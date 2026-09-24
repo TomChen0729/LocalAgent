@@ -1049,3 +1049,99 @@ def test_requirement_recovery_loop(
     assert agent.task_state["verification_status"] == "verified"
 
     assert agent.task_state["requirement_status"] == "passed"
+
+def test_execute_git_status(monkeypatch):
+    from agent.runtime import AgentRuntime
+    from agent.permissions import PermissionResult
+
+    monkeypatch.setattr(
+        "agent.runtime.git_status",
+        lambda: {
+            "success": True,
+            "tool": "git_status",
+            "status": "## master",
+            "message": "## master",
+        },
+    )
+
+    runtime = AgentRuntime()
+
+    monkeypatch.setattr(
+        runtime.permission_manager,
+        "check_permission",
+        lambda tool_name, arguments: PermissionResult(
+            allowed=True,
+            action="read",
+            message="allowed",
+        ),
+    )
+
+    result = runtime.execute_tool(
+        "git_status",
+        {},
+    )
+
+    assert result["success"] is True
+    assert result["tool"] == "git_status"
+    
+def test_execute_git_log(monkeypatch):
+    from agent.runtime import AgentRuntime
+    from agent.permissions import PermissionResult
+
+    monkeypatch.setattr(
+        "agent.runtime.git_log",
+        lambda limit=10: {
+            "success": True,
+            "tool": "git_log",
+            "log": "abc123 initial commit",
+            "message": "abc123 initial commit",
+        },
+    )
+
+    runtime = AgentRuntime()
+
+    monkeypatch.setattr(
+        runtime.permission_manager,
+        "check_permission",
+        lambda tool_name, arguments: PermissionResult(
+            allowed=True,
+            action="read",
+            message="allowed",
+        ),
+    )
+
+    result = runtime.execute_tool(
+        "git_log",
+        {
+            "limit": 5,
+        },
+    )
+
+    assert result["success"] is True
+    assert result["tool"] == "git_log"
+    
+def test_git_commit_permission_denied(monkeypatch):
+    from agent.runtime import AgentRuntime
+    from agent.permissions import PermissionResult
+
+    runtime = AgentRuntime()
+
+    monkeypatch.setattr(
+        runtime.permission_manager,
+        "check_permission",
+        lambda tool_name, arguments: PermissionResult(
+            allowed=False,
+            action="commit",
+            message="User denied permission.",
+        ),
+    )
+
+    result = runtime.execute_tool(
+        "git_commit",
+        {
+            "message": "test commit",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "permission_denied"

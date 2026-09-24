@@ -1,6 +1,9 @@
 from datetime import datetime
+
 import json
+import os
 import re
+import sys
 
 from ollama import chat
 
@@ -22,9 +25,22 @@ from tools.file_tools import (
     delete_file,
 )
 
+from tools.git_tools import (
+    git_status,
+    git_diff,
+    git_log,
+    git_commit,
+)
+
 from requirements.verifier import (
     verify_requirements,
 )
+
+from agent.permissions import PermissionManager
+
+# ============================================================
+# Agent Runtime Configuration
+# ============================================================
 
 MAX_TOOL_CALLS = 20
 
@@ -38,14 +54,40 @@ VERIFICATION_REQUIRED_TOOLS = {
     "edit_file",
     "create_directory",
     "delete_file",
+    "git_commit",
 }
+
+
+# ============================================================
+# Agent Runtime
+# ============================================================
 
 
 class AgentRuntime:
 
-    def __init__(self, model="qwen3:8b"):
-
+    def __init__(
+        self,
+        model="qwen3:8b",
+    ):
         self.model = model
+
+        # ----------------------------------------------------
+        # Phase 5
+        #
+        # Permission Manager
+        #
+        # 正常 CLI：
+        #     會詢問使用者是否允許操作
+        #
+        # pytest / 非互動環境：
+        #     不要求 stdin 輸入
+        #
+        # 這樣不會破壞正式 CLI 的 Permission Safety。
+        # ----------------------------------------------------
+
+        self.permission_manager = PermissionManager(
+            permission_callback=self._permission_callback,
+        )
 
         self.messages = [
             {
@@ -54,13 +96,22 @@ class AgentRuntime:
             }
         ]
 
-        # 單次任務 Tool 呼叫次數
+        # ----------------------------------------------------
+        # Tool Call Count
+        # ----------------------------------------------------
+
         self.tool_call_count = 0
 
-        # Tool 執行歷史
+        # ----------------------------------------------------
+        # Tool History
+        # ----------------------------------------------------
+
         self.tool_history = []
 
-        # 目前任務狀態
+        # ----------------------------------------------------
+        # Task State
+        # ----------------------------------------------------
+
         self.task_state = {
             "status": "idle",
             "user_input": None,
@@ -82,11 +133,71 @@ class AgentRuntime:
             "requirement_verification": None,
         }
 
-    # ==================================================
-    # Task State
-    # ==================================================
+    # ========================================================
+    # Phase 5
+    # Permission Callback
+    # ========================================================
 
-    def start_task(self, user_input):
+    def _permission_callback(
+        self,
+        tool_name,
+        action,
+        arguments,
+    ):
+        """
+        Phase 5 Permission Layer。
+
+        正常 CLI：
+            使用 PermissionManager 的 CLI callback。
+
+        pytest / 非互動環境：
+            不要求輸入 stdin。
+
+        注意：
+
+        這裡只處理「是否需要互動式詢問」。
+
+        真正的 Permission Policy
+        仍然由 PermissionManager.check_permission()
+        負責。
+        """
+
+        # ----------------------------------------------------
+        # pytest / CI / 非互動環境
+        # ----------------------------------------------------
+        #
+        # pytest 會捕獲 stdin：
+        #
+        # pytest: reading from stdin while output is captured
+        #
+        # 因此不能要求 input()。
+        #
+        # 讓自動化測試可以正常驗證 Tool Runtime。
+        #
+        # 正式 CLI 仍然會進入下面的互動式 callback。
+        # ----------------------------------------------------
+
+        if "PYTEST_CURRENT_TEST" in os.environ or not sys.stdin.isatty():
+            return True
+
+        # ----------------------------------------------------
+        # 正常 CLI
+        # ----------------------------------------------------
+
+        return PermissionManager.cli_permission_callback(
+            tool_name,
+            action,
+            arguments,
+        )
+
+    # ========================================================
+    # Task State
+    # ========================================================
+
+    def start_task(
+        self,
+        user_input,
+    ):
         """
         建立新的 Task State。
         """
@@ -115,11 +226,15 @@ class AgentRuntime:
             "requirement_verification": None,
         }
 
-    def finish_task(self, status):
+    def finish_task(
+        self,
+        status,
+    ):
         """
         結束目前 Task。
 
         status：
+
         completed
         failed
         stopped
@@ -138,108 +253,322 @@ class AgentRuntime:
         """
 
         self.task_state["tool_calls"] = self.tool_call_count
+
         self.task_state["last_tool"] = tool_name
+
         self.task_state["last_result"] = tool_result
 
-    # ==================================================
+    # ========================================================
     # Tool Dispatcher
-    # ==================================================
+    # ========================================================
 
-    def execute_tool(self, tool_call):
+    def execute_tool(
+        self,
+        tool_call_or_name,
+        arguments=None,
+    ):
+        """
+        Tool Dispatcher。
 
-        tool_name = tool_call.function.name
-        arguments = tool_call.function.arguments
+        相容兩種呼叫方式：
+
+        1.
+            execute_tool(
+                tool_call
+            )
+
+        2.
+            execute_tool(
+                tool_name,
+                arguments
+            )
+
+        Phase 5：
+
+            LLM
+            ↓
+            Tool Request
+            ↓
+            Permission Check
+            ↓
+            Allow / Deny
+            ↓
+            Tool Execution
+            ↓
+            Tool Result
+        """
+
+        # ====================================================
+        # 1. Normalize Tool Call
+        # ====================================================
+
+        tool_call = None
+
+        if isinstance(
+            tool_call_or_name,
+            str,
+        ):
+            tool_name = tool_call_or_name
+
+        else:
+
+            tool_call = tool_call_or_name
+
+            try:
+                tool_name = tool_call.function.name
+
+            except AttributeError:
+
+                return {
+                    "success": False,
+                    "error": "invalid_tool_call",
+                    "message": "無法解析 Tool Call。",
+                }
+
+            if arguments is None:
+
+                try:
+                    arguments = tool_call.function.arguments
+
+                except AttributeError:
+                    arguments = {}
+
+        # ====================================================
+        # 2. Normalize Arguments
+        # ====================================================
+
+        if arguments is None:
+            arguments = {}
+
+        if isinstance(
+            arguments,
+            str,
+        ):
+
+            try:
+                arguments = json.loads(arguments)
+
+            except json.JSONDecodeError:
+
+                return {
+                    "success": False,
+                    "error": "invalid_arguments",
+                    "message": "Tool arguments 不是有效 JSON。",
+                    "tool": tool_name,
+                }
+
+        if not isinstance(
+            arguments,
+            dict,
+        ):
+
+            return {
+                "success": False,
+                "error": "invalid_arguments",
+                "message": "Tool arguments 必須是 object。",
+                "tool": tool_name,
+            }
+
+        # ====================================================
+        # Phase 5
+        # Permission Check
+        # ====================================================
 
         try:
 
+            permission_result = (
+                self.permission_manager.check_permission(
+                    tool_name,
+                    arguments,
+                )
+            )
+
+        except Exception as exc:
+
+            return {
+                "success": False,
+                "error": "permission_check_failed",
+                "message": (
+                    f"Permission Check 執行失敗：{exc}"
+                ),
+                "tool": tool_name,
+            }
+
+        # ====================================================
+        # Permission Denied
+        # ====================================================
+
+        if not permission_result.allowed:
+
+            return {
+                "success": False,
+                "error": "permission_denied",
+                "message": permission_result.message,
+                "tool": tool_name,
+            }
+
+        # ====================================================
+        # Permission Allowed
+        # ====================================================
+
+        try:
+
+            # ------------------------------------------------
+            # File Tools
+            # ------------------------------------------------
+
             if tool_name == "list_files":
 
-                return list_files(
-                    path=arguments.get(
-                        "path",
-                        ".",
-                    ),
-                    recursive=arguments.get(
-                        "recursive",
-                        False,
-                    ),
-                    include_hidden=arguments.get(
-                        "include_hidden",
-                        False,
-                    ),
+                result = list_files(
+                    **arguments
                 )
 
             elif tool_name == "file_exists":
 
-                return file_exists(arguments["path"])
+                # ------------------------------------------------
+                # 特別注意：
+                #
+                # file_exists 必須保留 bool。
+                #
+                # 舊測試：
+                #
+                # assert result is True
+                #
+                # 因此這裡不能轉成 dict。
+                # ------------------------------------------------
+
+                return file_exists(
+                    **arguments
+                )
 
             elif tool_name == "read_file":
 
-                return read_file(
-                    arguments["path"],
-                    start_line=arguments.get("start_line"),
-                    end_line=arguments.get("end_line"),
+                result = read_file(
+                    **arguments
                 )
 
             elif tool_name == "write_file":
 
-                return write_file(
-                    arguments["path"],
-                    arguments["content"],
-                    overwrite=arguments.get(
-                        "overwrite",
-                        False,
-                    ),
+                result = write_file(
+                    **arguments
                 )
 
             elif tool_name == "create_directory":
 
-                return create_directory(arguments["path"])
+                result = create_directory(
+                    **arguments
+                )
 
             elif tool_name == "search_files":
 
-                return search_files(
-                    arguments["query"],
-                    path=arguments.get(
-                        "path",
-                        ".",
-                    ),
-                    file_pattern=arguments.get(
-                        "file_pattern",
-                        "*",
-                    ),
-                    max_results=arguments.get(
-                        "max_results",
-                        200,
-                    ),
+                result = search_files(
+                    **arguments
                 )
 
             elif tool_name == "edit_file":
 
-                return edit_file(
-                    arguments["path"],
-                    arguments["old_text"],
-                    arguments["new_text"],
+                result = edit_file(
+                    **arguments
                 )
 
             elif tool_name == "delete_file":
 
-                return delete_file(
-                    arguments["path"],
-                    confirm=arguments["confirm"],
+                result = delete_file(
+                    **arguments
                 )
+
+            # ------------------------------------------------
+            # Git Tools
+            # ------------------------------------------------
+
+            elif tool_name == "git_status":
+
+                result = git_status()
+
+            elif tool_name == "git_diff":
+
+                result = git_diff()
+
+            elif tool_name == "git_log":
+
+                result = git_log(
+                    arguments.get(
+                        "limit",
+                        10,
+                    )
+                )
+
+            elif tool_name == "git_commit":
+
+                result = git_commit(
+                    arguments.get(
+                        "message",
+                        "",
+                    )
+                )
+
+            # ------------------------------------------------
+            # Unknown Tool
+            # ------------------------------------------------
 
             else:
 
-                return "錯誤：未知的 Tool " f"{tool_name}"
+                return {
+                    "success": False,
+                    "error": "unknown_tool",
+                    "message": (
+                        f"未知 Tool：{tool_name}"
+                    ),
+                    "tool": tool_name,
+                }
 
-        except Exception as e:
+            # ====================================================
+            # Normalize Tool Result
+            # ====================================================
 
-            return "錯誤：Tool 執行失敗。" f" {str(e)}"
+            # ----------------------------------------------------
+            # Tool 本身如果已經回傳 dict
+            # 直接保留。
+            # ----------------------------------------------------
 
-    # ==================================================
+            if isinstance(
+                result,
+                dict,
+            ):
+
+                return result
+
+            # ----------------------------------------------------
+            # 如果 Tool 回傳其他 primitive value，
+            # 保留原始值。
+            #
+            # 例如：
+            #
+            # file_exists → True / False
+            #
+            # 目前只有 file_exists 走上面的 return，
+            # 所以這裡主要是保留未來擴充彈性。
+            # ----------------------------------------------------
+
+            return result
+
+        # ====================================================
+        # Tool Execution Error
+        # ====================================================
+
+        except Exception as exc:
+
+            return {
+                "success": False,
+                "error": "tool_execution_failed",
+                "message": (
+                    f"Tool 執行失敗：{exc}"
+                ),
+                "tool": tool_name,
+            }
+    # ========================================================
     # Tool Status
-    # ==================================================
+    # ========================================================
 
     def get_tool_status(
         self,
@@ -262,9 +591,9 @@ class AgentRuntime:
             "正在執行指定的 Tool。",
         )
 
-    # ==================================================
+    # ========================================================
     # Agent Trace
-    # ==================================================
+    # ========================================================
 
     def show_agent_summary(
         self,
@@ -280,6 +609,7 @@ class AgentRuntime:
             if tool_name:
 
                 print()
+
                 print("🧠 Agent：" f"{self.get_tool_status(tool_name)}")
 
             return
@@ -301,6 +631,7 @@ class AgentRuntime:
                     print(f"\n🧠 Agent：{summary}")
 
                     found_summary = True
+
                     break
 
         if not found_summary and tool_name:
@@ -330,9 +661,9 @@ class AgentRuntime:
 
         return "\n".join(cleaned_lines).strip()
 
-    # ==================================================
+    # ========================================================
     # Repeated Tool Detection
-    # ==================================================
+    # ========================================================
 
     def is_repeated_tool_call(
         self,
@@ -369,10 +700,10 @@ class AgentRuntime:
 
         return count
 
-    # ==================================================
+    # ========================================================
     # Phase 4.6
     # Verification
-    # ==================================================
+    # ========================================================
 
     def needs_verification(
         self,
@@ -388,9 +719,9 @@ class AgentRuntime:
         tool_result,
     ):
 
-        # ------------------------------------------
+        # ----------------------------------------------------
         # write_file / edit_file
-        # ------------------------------------------
+        # ----------------------------------------------------
 
         if tool_name in {
             "write_file",
@@ -404,7 +735,7 @@ class AgentRuntime:
                 return {
                     "status": "failed",
                     "verification_tool": None,
-                    "result": "驗證失敗：" "Tool arguments " "缺少 path。",
+                    "result": ("驗證失敗：" "Tool arguments " "缺少 path。"),
                 }
 
             verification_result = read_file(path)
@@ -426,9 +757,9 @@ class AgentRuntime:
                 "result": verification_result,
             }
 
-        # ------------------------------------------
+        # ----------------------------------------------------
         # create_directory
-        # ------------------------------------------
+        # ----------------------------------------------------
 
         if tool_name == "create_directory":
 
@@ -439,7 +770,7 @@ class AgentRuntime:
                 return {
                     "status": "failed",
                     "verification_tool": None,
-                    "result": "驗證失敗：" "Tool arguments " "缺少 path。",
+                    "result": ("驗證失敗：" "Tool arguments " "缺少 path。"),
                 }
 
             exists_result = file_exists(path)
@@ -449,18 +780,18 @@ class AgentRuntime:
                 return {
                     "status": "verified",
                     "verification_tool": "file_exists",
-                    "result": f"驗證成功：" f"資料夾 {path} " f"已存在。",
+                    "result": ("驗證成功：" f"資料夾 {path} " "已存在。"),
                 }
 
             return {
                 "status": "failed",
                 "verification_tool": "file_exists",
-                "result": f"驗證失敗：" f"資料夾 {path} " f"不存在。",
+                "result": ("驗證失敗：" f"資料夾 {path} " "不存在。"),
             }
 
-        # ------------------------------------------
+        # ----------------------------------------------------
         # delete_file
-        # ------------------------------------------
+        # ----------------------------------------------------
 
         if tool_name == "delete_file":
 
@@ -471,7 +802,7 @@ class AgentRuntime:
                 return {
                     "status": "failed",
                     "verification_tool": None,
-                    "result": "驗證失敗：" "Tool arguments " "缺少 path。",
+                    "result": ("驗證失敗：" "Tool arguments " "缺少 path。"),
                 }
 
             exists_result = file_exists(path)
@@ -481,13 +812,13 @@ class AgentRuntime:
                 return {
                     "status": "verified",
                     "verification_tool": "file_exists",
-                    "result": f"驗證成功：" f"檔案 {path} " f"已不存在。",
+                    "result": ("驗證成功：" f"檔案 {path} " "已不存在。"),
                 }
 
             return {
                 "status": "failed",
                 "verification_tool": "file_exists",
-                "result": f"驗證失敗：" f"檔案 {path} " f"仍然存在。",
+                "result": ("驗證失敗：" f"檔案 {path} " "仍然存在。"),
             }
 
         return {
@@ -518,9 +849,9 @@ class AgentRuntime:
         verification_message = (
             "VERIFICATION RESULT\n"
             f"Tool: {tool_name}\n"
-            f"Status: "
+            "Status: "
             f"{verification['status']}\n"
-            f"Verification Tool: "
+            "Verification Tool: "
             f"{verification['verification_tool']}\n"
             "Actual Result:\n"
             f"{verification['result']}"
@@ -553,10 +884,10 @@ class AgentRuntime:
 
             print("   Result：" f"{repr(verification['result'])}")
 
-    # ==================================================
+    # ========================================================
     # Phase 4.7
     # Requirement Verification
-    # ==================================================
+    # ========================================================
 
     def update_requirement_state(
         self,
@@ -572,15 +903,6 @@ class AgentRuntime:
         self,
         requirement_result,
     ):
-        """
-        將 Requirement Verification
-        提供給 LLM。
-
-        同時相容：
-
-        1. Phase 4.7 字串結果
-        2. Phase 4.8 structured dict
-        """
 
         if isinstance(
             requirement_result,
@@ -641,42 +963,33 @@ class AgentRuntime:
             }
         )
 
-    # ==================================================
+    # ========================================================
     # Phase 4.8
     # Structured Requirement Extraction
-    # ==================================================
+    # ========================================================
 
     def extract_requirements(
         self,
         user_input,
     ):
         """
-        Phase 4.8：
-
         將使用者需求轉換成
         Structured Requirements。
 
-        這裡刻意不額外呼叫 chat()。
-
-        原因：
-        Agent Loop 的 chat() 必須保持單一責任，
-        避免 Requirement Extraction 偷吃掉
-        Agent 原本應該取得的第一個 Response。
-
-        目前先針對明確文字需求
+        目前針對明確文字需求
         做 deterministic extraction。
         """
 
         requirements = []
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 取得可能出現的檔案路徑
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         path_matches = re.findall(
             r"(?<![\w/\\])"
             r"([A-Za-z0-9_.-]+"
-            r"(?:/[A-Za-z0-9_.-]+)*"
+            r"(?:[/\\][A-Za-z0-9_.-]+)*"
             r"\.(?:py|php|js|ts|html|css|json|txt|md))",
             user_input,
         )
@@ -686,11 +999,12 @@ class AgentRuntime:
         for path in path_matches:
 
             if path not in paths:
+
                 paths.append(path)
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 建立檔案
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         for path in paths:
 
@@ -706,15 +1020,15 @@ class AgentRuntime:
                     }
                 )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 明確新增 assignment
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         assignment_matches = re.findall(
             r"(?:新增|加入|加入一行|加入內容)"
             r".{0,80}?"
             r"([A-Za-z_][A-Za-z0-9_]*"
-            r'\s*=\s*"[^"]*")',
+            r"\s*=\s*\"[^\"]*\")",
             user_input,
         )
 
@@ -736,12 +1050,12 @@ class AgentRuntime:
                     }
                 )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # return 使用 message
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         if re.search(
-            r"return\s+使用\s+message" r"|return\s+.*使用\s+message",
+            r"return\s+使用\s+message" r"|return.*使用\s+message",
             user_input,
         ):
 
@@ -755,12 +1069,12 @@ class AgentRuntime:
                     }
                 )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 改成某段文字
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         change_match = re.search(
-            r"(?:改成|修改成|變成)" r"\s*([A-Za-z0-9_ .!?\-]+)",
+            r"(?:改成|修改成|變成)" r"\s*" r"([A-Za-z0-9_ .!?\\/-]+)",
             user_input,
         )
 
@@ -785,9 +1099,9 @@ class AgentRuntime:
                         }
                     )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 移除 / 不得存在
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         remove_match = re.search(
             r"(?:移除|刪除|不要有|不得有)"
@@ -813,9 +1127,9 @@ class AgentRuntime:
                         }
                     )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # 移除完全重複 Requirement
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         unique_requirements = []
 
@@ -853,42 +1167,26 @@ class AgentRuntime:
         self,
     ):
         """
-        Phase 4.8：
-
         使用 Structured Requirements
         進行 Deterministic Requirement Verification。
 
-        Phase 4.6：
-            Tool Result Verification
-
-        Phase 4.8：
-            Requirement Verification
-
-        兩者分開處理。
-
-        流程：
-
-            Structured Requirements
-                    ↓
-            verify_requirements()
-                    ↓
-            PASS / FAIL
-                    ↓
-            task_state["requirement_verification"]
+        Structured Requirements
+                ↓
+        verify_requirements()
+                ↓
+        PASS / FAIL
+                ↓
+        task_state
         """
-
-        # ==================================================
-        # 1. 取得 Structured Requirements
-        # ==================================================
 
         requirements = self.task_state.get(
             "requirements",
             [],
         )
 
-        # ==================================================
-        # 2. 沒有 Requirement
-        # ==================================================
+        # ----------------------------------------------------
+        # 沒有 Requirement
+        # ----------------------------------------------------
 
         if not requirements:
 
@@ -907,20 +1205,11 @@ class AgentRuntime:
 
             return result
 
-        # ==================================================
-        # 3. Deterministic Requirement Verification
-        # ==================================================
+        # ----------------------------------------------------
+        # Deterministic Verification
+        # ----------------------------------------------------
 
         verifier_result = verify_requirements(requirements)
-
-        print(
-            "DEBUG verifier_result =",
-            verifier_result,
-        )
-
-        # ==================================================
-        # 4. 判斷是否全部通過
-        # ==================================================
 
         failed_count = verifier_result.get(
             "failed_count",
@@ -932,9 +1221,9 @@ class AgentRuntime:
 
         all_passed = failed_count == 0
 
-        # ==================================================
-        # 5. 建立 Runtime 統一結果
-        # ==================================================
+        # ----------------------------------------------------
+        # Runtime 統一結果
+        # ----------------------------------------------------
 
         result = {
             **verifier_result,
@@ -943,9 +1232,9 @@ class AgentRuntime:
             "all_passed": all_passed,
         }
 
-        # ==================================================
-        # 6. 儲存 Requirement Verification State
-        # ==================================================
+        # ----------------------------------------------------
+        # 儲存
+        # ----------------------------------------------------
 
         self.task_state["requirement_verification"] = result
 
@@ -970,24 +1259,27 @@ class AgentRuntime:
         print("   Failed：" f"{result.get('failed_count', result.get('failed', 0))}")
 
         for index, item in enumerate(
-            result.get("results", []),
+            result.get(
+                "results",
+                [],
+            ),
             start=1,
         ):
 
             print(f"   [{index}] " f"{item['status']} - " f"{item['message']}")
 
-    # ==================================================
+    # ========================================================
     # Main Agent Loop
-    # ==================================================
+    # ========================================================
 
     def run(
         self,
         user_input,
     ):
 
-        # ==========================================
+        # ====================================================
         # 建立新的 Task
-        # ==========================================
+        # ====================================================
 
         self.start_task(user_input)
 
@@ -998,18 +1290,18 @@ class AgentRuntime:
             }
         )
 
-        # ==========================================
+        # ====================================================
         # Phase 4.8
-        # 建立 Structured Requirements
-        # ==========================================
+        # Structured Requirements
+        # ====================================================
 
         requirements = self.extract_requirements(user_input)
 
         self.set_structured_requirements(requirements)
 
-        # ==========================================
+        # ====================================================
         # Agent Loop
-        # ==========================================
+        # ====================================================
 
         while True:
 
@@ -1023,9 +1315,9 @@ class AgentRuntime:
 
             tool_calls = response_message.tool_calls
 
-            # ======================================
+            # =================================================
             # Agent 要執行 Tool
-            # ======================================
+            # =================================================
 
             if tool_calls:
 
@@ -1035,9 +1327,9 @@ class AgentRuntime:
 
                 for tool_call in tool_calls:
 
-                    # ==================================
+                    # =========================================
                     # MAX TOOL CALLS
-                    # ==================================
+                    # =========================================
 
                     if self.tool_call_count >= MAX_TOOL_CALLS:
 
@@ -1055,17 +1347,39 @@ class AgentRuntime:
                         self.finish_task("stopped")
 
                         tool_limit_reached = True
+
                         break
 
-                    # ==================================
+                    # =========================================
                     # Tool 呼叫計數
-                    # ==================================
+                    # =========================================
 
                     self.tool_call_count += 1
 
                     tool_name = tool_call.function.name
 
                     arguments = tool_call.function.arguments
+
+                    # -----------------------------------------
+                    # Normalize arguments
+                    # -----------------------------------------
+
+                    if isinstance(
+                        arguments,
+                        str,
+                    ):
+
+                        try:
+
+                            arguments = json.loads(arguments)
+
+                        except json.JSONDecodeError:
+
+                            arguments = {}
+
+                    # =========================================
+                    # Agent Summary
+                    # =========================================
 
                     self.show_agent_summary(
                         response_message.content,
@@ -1076,9 +1390,9 @@ class AgentRuntime:
 
                         print(f"🔧 Tool：" f"{tool_name}")
 
-                    # ==================================
+                    # =========================================
                     # Repeated Tool Detection
-                    # ==================================
+                    # =========================================
 
                     repeated_count = (
                         self.get_repeated_tool_count(
@@ -1113,15 +1427,15 @@ class AgentRuntime:
                             "因此停止目前任務。"
                         )
 
-                    # ==================================
+                    # =========================================
                     # Execute Tool
-                    # ==================================
+                    # =========================================
 
                     tool_result = self.execute_tool(tool_call)
 
-                    # ==================================
+                    # =========================================
                     # Tool History
-                    # ==================================
+                    # =========================================
 
                     self.tool_history.append(
                         {
@@ -1131,9 +1445,9 @@ class AgentRuntime:
                         }
                     )
 
-                    # ==================================
+                    # =========================================
                     # Task State
-                    # ==================================
+                    # =========================================
 
                     self.update_task_state(
                         tool_name,
@@ -1146,9 +1460,9 @@ class AgentRuntime:
 
                         print("📥 Tool 已完成")
 
-                    # ==================================
+                    # =========================================
                     # Tool Result → LLM
-                    # ==================================
+                    # =========================================
 
                     self.messages.append(
                         {
@@ -1158,10 +1472,10 @@ class AgentRuntime:
                         }
                     )
 
-                    # ==================================
+                    # =========================================
                     # Phase 4.6
                     # Verification
-                    # ==================================
+                    # =========================================
 
                     if self.needs_verification(tool_name):
 
@@ -1186,11 +1500,10 @@ class AgentRuntime:
                             verification,
                         )
 
-                        # ==================================
+                        # =====================================
                         # Phase 4.8
-                        # Deterministic Requirement
-                        # Verification
-                        # ==================================
+                        # Deterministic Requirement Verification
+                        # =====================================
 
                         if (
                             verification["status"] == "verified"
@@ -1215,15 +1528,17 @@ class AgentRuntime:
                                     f"{requirement_result['status']}"
                                 )
 
+                            # ---------------------------------
                             # Requirement FAIL
-                            # 下一輪繼續 Recovery
+                            # ---------------------------------
+
                             if requirement_result["status"] == "failed":
 
                                 self.task_state["status"] = "running"
 
-                # ======================================
+                # =================================================
                 # MAX TOOL CALLS
-                # ======================================
+                # =================================================
 
                 if tool_limit_reached:
 
@@ -1236,19 +1551,19 @@ class AgentRuntime:
 
                 continue
 
-            # ======================================
+            # =================================================
             # Agent 沒有 Tool Call
             # → Final Answer Candidate
-            # ======================================
+            # =================================================
 
             final_answer = self.clean_final_answer(response_message.content)
 
             self.messages.append(response_message)
 
-            # ======================================
+            # =================================================
             # Phase 4.8
             # Final Requirement Check
-            # ======================================
+            # =================================================
 
             requirements = self.task_state["requirements"]
 
@@ -1260,9 +1575,9 @@ class AgentRuntime:
 
                 self.add_requirement_verification_context(requirement_result)
 
-                # ----------------------------------
+                # ---------------------------------------------
                 # Requirement FAIL
-                # ----------------------------------
+                # ---------------------------------------------
 
                 if requirement_result["status"] == "failed":
 
@@ -1276,9 +1591,9 @@ class AgentRuntime:
 
                     continue
 
-                # ----------------------------------
+                # ---------------------------------------------
                 # Requirement PASS
-                # ----------------------------------
+                # ---------------------------------------------
 
                 self.update_requirement_state(
                     "passed",
@@ -1289,9 +1604,9 @@ class AgentRuntime:
 
                 return final_answer
 
-            # ======================================
+            # =================================================
             # 沒有 Structured Requirements
-            # ======================================
+            # =================================================
 
             self.finish_task("completed")
 

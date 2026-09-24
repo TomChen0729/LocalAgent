@@ -1,240 +1,217 @@
 tools = [
-    # ========================================================
-    # list_files
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "列出 LocalAgent 專案中的檔案與資料夾。"
-            "預設只列出指定資料夾的一層內容。"
-            "如果需要遞迴列出子資料夾，將 recursive 設為 true。",
+            "description": "列出指定目錄中的檔案與資料夾。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要列出的資料夾路徑。"
-                        "例如 '.'、'test'、'config'",
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "是否遞迴列出所有子資料夾與檔案。"
-                        "預設為 false。",
-                    },
-                    "include_hidden": {
-                        "type": "boolean",
-                        "description": "是否包含隱藏檔案與隱藏資料夾。"
-                        "預設為 false。",
-                    },
+                        "description": "要列出的目錄路徑。",
+                    }
                 },
                 "required": [],
             },
         },
     },
-    # ========================================================
-    # file_exists
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "file_exists",
-            "description": "確認指定路徑是否存在，並判斷它是檔案還是資料夾。"
-            "不會修改任何檔案。",
+            "description": "確認指定檔案或資料夾是否存在。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要確認的專案內路徑。",
-                    },
+                        "description": "檔案或資料夾路徑。",
+                    }
                 },
                 "required": ["path"],
             },
         },
     },
-    # ========================================================
-    # read_file
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "讀取 LocalAgent 專案中的 UTF-8 文字檔案。"
-            "修改檔案前應先使用此工具取得目前實際內容。"
-            "可以使用 start_line 與 end_line 讀取特定行範圍。",
+            "description": "讀取指定檔案內容。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "要讀取的檔案路徑。",
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "description": "開始讀取的行號，從 1 開始。",
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "description": "結束讀取的行號。",
-                    },
+                    }
                 },
                 "required": ["path"],
             },
         },
     },
-    # ========================================================
-    # write_file
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "建立新的 UTF-8 文字檔案。"
-            "預設禁止覆寫已存在的檔案。"
-            "只有在確定需要完整覆寫既有檔案時才使用 overwrite=true。",
+            "description": "建立或覆寫檔案。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要建立或覆寫的檔案路徑。",
+                        "description": "檔案路徑。",
                     },
                     "content": {
                         "type": "string",
-                        "description": "完整的檔案內容。",
-                    },
-                    "overwrite": {
-                        "type": "boolean",
-                        "description": "是否允許覆寫既有檔案。" "預設為 false。",
+                        "description": "要寫入的內容。",
                     },
                 },
-                "required": [
-                    "path",
-                    "content",
-                ],
+                "required": ["path", "content"],
             },
         },
     },
-    # ========================================================
-    # create_directory
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "create_directory",
-            "description": "在 LocalAgent 專案內建立資料夾。"
-            "如果資料夾已經存在，不會重複建立。",
+            "description": "建立資料夾。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要建立的資料夾路徑。",
-                    },
+                        "description": "資料夾路徑。",
+                    }
                 },
                 "required": ["path"],
             },
         },
     },
-    # ========================================================
-    # search_files
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "搜尋 LocalAgent 專案中的文字檔案內容。"
-            "可以指定搜尋路徑與檔案 pattern。"
-            "例如搜尋 Python 函式時，可以使用 query='def hello' "
-            "與 file_pattern='*.py'。",
+            "description": "搜尋符合條件的檔案。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
+                    "pattern": {
                         "type": "string",
-                        "description": "要搜尋的文字。",
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "搜尋範圍。" "例如 '.' 或 'test'。",
-                    },
-                    "file_pattern": {
-                        "type": "string",
-                        "description": "檔案 pattern。"
-                        "例如 '*.py'、'*.php'、'*.js'。"
-                        "預設為 '*'。",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "最多回傳多少筆搜尋結果。" "預設為 200。",
-                    },
+                        "description": "搜尋模式。",
+                    }
                 },
-                "required": ["query"],
+                "required": ["pattern"],
             },
         },
     },
-    # ========================================================
-    # edit_file
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "精確修改 LocalAgent 專案中的文字檔案。"
-            "old_text 必須在檔案中恰好出現一次。"
-            "如果不存在或出現多次，Tool 將拒絕修改。"
-            "修改既有檔案前應先使用 read_file 取得實際內容。",
+            "description": "修改指定檔案中的內容。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要修改的檔案路徑。",
+                        "description": "檔案路徑。",
                     },
                     "old_text": {
                         "type": "string",
-                        "description": "檔案中目前存在、準備被替換的完整文字。",
+                        "description": "要被取代的舊文字。",
                     },
                     "new_text": {
                         "type": "string",
-                        "description": "要替換成的新文字。",
+                        "description": "新的文字。",
                     },
                 },
-                "required": [
-                    "path",
-                    "old_text",
-                    "new_text",
-                ],
+                "required": ["path", "old_text", "new_text"],
             },
         },
     },
-    # ========================================================
-    # delete_file
-    # ========================================================
     {
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "刪除 LocalAgent 專案中的指定檔案。"
-            "這是高風險操作，必須明確指定 confirm=true。"
-            "只能刪除檔案，不允許刪除資料夾。",
+            "description": "刪除指定檔案。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "要刪除的檔案路徑。",
-                    },
-                    "confirm": {
-                        "type": "boolean",
-                        "description": "必須明確設為 true 才會執行刪除。",
-                    },
+                    }
                 },
-                "required": [
-                    "path",
-                    "confirm",
-                ],
+                "required": ["path"],
+            },
+        },
+    },
+    # ==========================================================
+    # Phase 6 - Git Tools
+    # ==========================================================
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": (
+                "查看目前 Git Repository 的狀態，"
+                "包含目前 branch 以及尚未提交的檔案修改。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": ("查看目前 Git Repository 尚未提交的程式碼差異。"),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": ("查看 Git Repository 最近的 Commit 歷史。"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多顯示幾筆 Commit，預設 10。",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": (
+                "建立 Git Commit。"
+                "這是一個會修改 Git Repository 狀態的操作，"
+                "執行前必須經過 Permission Layer。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Git Commit message。",
+                    }
+                },
+                "required": ["message"],
             },
         },
     },
