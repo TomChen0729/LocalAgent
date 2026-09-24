@@ -92,16 +92,40 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "搜尋符合條件的檔案。",
+            "description": (
+                "搜尋專案檔案中的文字內容。"
+                "可以指定搜尋文字、搜尋路徑、檔案類型以及最大結果數量。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {
+                    "query": {
                         "type": "string",
-                        "description": "搜尋模式。",
-                    }
+                        "description": (
+                            "要搜尋的文字內容。"
+                            "例如 PermissionManager、SYSTEM_PROMPT、def search_files。"
+                        ),
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "要搜尋的專案目錄路徑。" "預設為目前專案根目錄。"
+                        ),
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": (
+                            "限制搜尋的檔案類型。" "例如 *.py、*.txt。預設為 *。"
+                        ),
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": ("最多回傳幾筆搜尋結果。" "預設為 200。"),
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
                 },
-                "required": ["pattern"],
+                "required": ["query"],
             },
         },
     },

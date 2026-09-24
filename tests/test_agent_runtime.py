@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import MagicMock
 
 import agent.runtime as runtime_module
@@ -29,6 +30,25 @@ def make_response(
     response.message.tool_calls = tool_calls or []
 
     return response
+
+@pytest.fixture(autouse=True)
+def disable_requirement_parser(monkeypatch):
+    """
+    Agent Runtime Unit Test 不實際呼叫 Qwen3 Requirement Parser。
+
+    Requirement Parser 本身會在
+    tests/test_requirement_parser.py
+    與相關 Integration Test 中獨立測試。
+
+    這裡讓 Runtime 使用原本的 legacy requirement extraction，
+    避免 Unit Test 因為 LLM inference 而變慢或產生不穩定結果。
+    """
+
+    monkeypatch.setattr(
+        AgentRuntime,
+        "parse_task_specification",
+        lambda self, user_input: None,
+    )
 
 
 # ==================================================
