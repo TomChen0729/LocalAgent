@@ -215,4 +215,49 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": (
+                "Execute an allowed development command "
+                "inside the current project. "
+                "Use this for running tests or development tools "
+                "such as pytest, python, php, composer, npm, node, "
+                "or docker."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "program": {
+                        "type": "string",
+                        "description": (
+                            "The executable program to run. "
+                            "Allowed programs include "
+                            "python, pytest, php, composer, "
+                            "npm, node, and docker."
+                        ),
+                    },
+                    "arguments": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                        },
+                        "description": ("Command arguments as a list of strings."),
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds. " "Default is 60."
+                        ),
+                        "minimum": 1,
+                        "maximum": 600,
+                    },
+                },
+                "required": [
+                    "program",
+                ],
+            },
+        },
+    },
 ]

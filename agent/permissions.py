@@ -33,6 +33,12 @@ class PermissionManager:
 
         delete
             → 明確確認
+
+        commit
+            → 詢問使用者
+
+        execute
+            → 詢問使用者
     """
 
     TOOL_ACTIONS = {
@@ -48,6 +54,7 @@ class PermissionManager:
         "git_diff": "read",
         "git_log": "read",
         "git_commit": "commit",
+        "execute_command": "execute",
     }
 
     def __init__(

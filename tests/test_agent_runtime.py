@@ -5,7 +5,7 @@ import agent.runtime as runtime_module
 from agent.runtime import (
     AgentRuntime,
 )
-
+from agent.permissions import PermissionResult
 
 def make_tool_call(
     tool_name,
@@ -1145,3 +1145,107 @@ def test_git_commit_permission_denied(monkeypatch):
 
     assert result["success"] is False
     assert result["error"] == "permission_denied"
+
+def test_execute_command_permission_denied(
+    monkeypatch,
+):
+    runtime = AgentRuntime()
+
+    def deny_permission(
+        tool_name,
+        arguments,
+    ):
+        return PermissionResult(
+            allowed=False,
+            action="execute",
+            message="User denied permission.",
+        )
+
+    runtime.permission_manager.check_permission = (
+        deny_permission
+    )
+
+    result = runtime.execute_tool(
+        "execute_command",
+        {
+            "program": "python",
+            "arguments": [
+                "--version",
+            ],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "permission_denied"
+    assert result["tool"] == "execute_command"
+
+
+def test_execute_command_allowed(
+    monkeypatch,
+):
+    runtime = AgentRuntime()
+
+    def allow_permission(
+        tool_name,
+        arguments,
+    ):
+        return PermissionResult(
+            allowed=True,
+            action="execute",
+            message="allowed",
+        )
+
+    runtime.permission_manager.check_permission = (
+        allow_permission
+    )
+
+    result = runtime.execute_tool(
+        "execute_command",
+        {
+            "program": "python",
+            "arguments": [
+                "--version",
+            ],
+        },
+    )
+
+    assert result["success"] is True
+    assert result["exit_code"] == 0
+    assert (
+        "Python" in result["stdout"]
+        or "Python" in result["stderr"]
+    )
+
+
+def test_execute_command_disallowed_program(
+    monkeypatch,
+):
+    runtime = AgentRuntime()
+
+    def allow_permission(
+        tool_name,
+        arguments,
+    ):
+        return PermissionResult(
+            allowed=True,
+            action="execute",
+            message="allowed",
+        )
+
+    runtime.permission_manager.check_permission = (
+        allow_permission
+    )
+
+    result = runtime.execute_tool(
+        "execute_command",
+        {
+            "program": "powershell",
+            "arguments": [
+                "-Command",
+                "Write-Host test",
+            ],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "program_not_allowed"

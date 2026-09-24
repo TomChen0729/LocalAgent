@@ -24,7 +24,7 @@ from tools.file_tools import (
     edit_file,
     delete_file,
 )
-
+from tools.command_tools import execute_command
 from tools.git_tools import (
     git_status,
     git_diff,
@@ -376,11 +376,9 @@ class AgentRuntime:
 
         try:
 
-            permission_result = (
-                self.permission_manager.check_permission(
-                    tool_name,
-                    arguments,
-                )
+            permission_result = self.permission_manager.check_permission(
+                tool_name,
+                arguments,
             )
 
         except Exception as exc:
@@ -388,9 +386,7 @@ class AgentRuntime:
             return {
                 "success": False,
                 "error": "permission_check_failed",
-                "message": (
-                    f"Permission Check 執行失敗：{exc}"
-                ),
+                "message": (f"Permission Check 執行失敗：{exc}"),
                 "tool": tool_name,
             }
 
@@ -419,9 +415,7 @@ class AgentRuntime:
 
             if tool_name == "list_files":
 
-                result = list_files(
-                    **arguments
-                )
+                result = list_files(**arguments)
 
             elif tool_name == "file_exists":
 
@@ -437,44 +431,51 @@ class AgentRuntime:
                 # 因此這裡不能轉成 dict。
                 # ------------------------------------------------
 
-                return file_exists(
-                    **arguments
-                )
+                return file_exists(**arguments)
 
             elif tool_name == "read_file":
 
-                result = read_file(
-                    **arguments
-                )
+                result = read_file(**arguments)
 
             elif tool_name == "write_file":
 
-                result = write_file(
-                    **arguments
-                )
+                result = write_file(**arguments)
 
             elif tool_name == "create_directory":
 
-                result = create_directory(
-                    **arguments
-                )
+                result = create_directory(**arguments)
 
             elif tool_name == "search_files":
 
-                result = search_files(
-                    **arguments
-                )
+                result = search_files(**arguments)
 
             elif tool_name == "edit_file":
 
-                result = edit_file(
-                    **arguments
-                )
+                result = edit_file(**arguments)
 
             elif tool_name == "delete_file":
 
-                result = delete_file(
-                    **arguments
+                result = delete_file(**arguments)
+
+            # ------------------------------------------------
+            # Command Tools
+            # ------------------------------------------------
+
+            elif tool_name == "execute_command":
+
+                result = execute_command(
+                    program=arguments.get(
+                        "program",
+                        "",
+                    ),
+                    arguments=arguments.get(
+                        "arguments",
+                        [],
+                    ),
+                    timeout=arguments.get(
+                        "timeout",
+                        60,
+                    ),
                 )
 
             # ------------------------------------------------
@@ -516,9 +517,7 @@ class AgentRuntime:
                 return {
                     "success": False,
                     "error": "unknown_tool",
-                    "message": (
-                        f"未知 Tool：{tool_name}"
-                    ),
+                    "message": (f"未知 Tool：{tool_name}"),
                     "tool": tool_name,
                 }
 
@@ -561,11 +560,10 @@ class AgentRuntime:
             return {
                 "success": False,
                 "error": "tool_execution_failed",
-                "message": (
-                    f"Tool 執行失敗：{exc}"
-                ),
+                "message": (f"Tool 執行失敗：{exc}"),
                 "tool": tool_name,
             }
+
     # ========================================================
     # Tool Status
     # ========================================================
