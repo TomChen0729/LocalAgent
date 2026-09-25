@@ -47,7 +47,9 @@ from requirements.specification import (
     TaskSpecification,
     OutputConstraints,
 )
-
+from requirements.specification_validator import (
+    SpecificationValidator,
+)
 from requirements.output_verifier import (
     verify_output,
     count_words,
@@ -126,7 +128,12 @@ class AgentRuntime:
         self.requirement_parser = RequirementParser(
             model=self.model,
         )
-
+        # ----------------------------------------------------
+        # Phase 8.6
+        #
+        # Specification Validator
+        # ----------------------------------------------------
+        self.specification_validator = SpecificationValidator()
         # ----------------------------------------------------
         # Phase 5
         #
@@ -202,6 +209,9 @@ class AgentRuntime:
             "task_specification": None,
             "parser_status": None,
             "parser_error": None,
+            # Phase 8.6
+            "specification_validation_status": None,
+            "specification_validation_result": None,
             # Phase 8.4
             "requirement_failure_count": 0,
             "requirement_progress_since_failure": False,
@@ -438,6 +448,204 @@ class AgentRuntime:
                 ensure_ascii=False,
             )
         )
+
+    # ========================================================
+    # Phase 8.6
+    # Specification Validation
+    # ========================================================
+
+    def validate_task_specification(
+        self,
+        specification,
+    ):
+        """
+        Phase 8.6：
+
+        使用 SpecificationValidator
+        對 TaskSpecification 進行 Runtime Validation。
+
+        Runtime 本身不負責重新實作 Specification
+        的欄位驗證邏輯。
+
+        Validation Authority：
+
+            requirements/specification_validator.py
+
+        Runtime 只負責：
+
+            1. 呼叫 Validator
+            2. 保存 Validation Result
+            3. PASS → 繼續 Runtime
+            4. FAIL → 停止 Task
+        """
+
+        # ----------------------------------------------------
+        # 基本型別檢查
+        # ----------------------------------------------------
+
+        if not isinstance(
+            specification,
+            TaskSpecification,
+        ):
+
+            result = {
+                "status": "failed",
+                "passed": False,
+                "failed": True,
+                "errors": ["Runtime 收到的 Specification " "不是 TaskSpecification。"],
+                "warnings": [],
+                "checked": [],
+            }
+
+            self.task_state["specification_validation_status"] = "failed"
+
+            self.task_state["specification_validation_result"] = result
+
+            if SHOW_AGENT_TRACE:
+
+                print()
+                print("🛑 Runtime：" "Specification Validation FAIL")
+
+                print("   Reason：" "Specification 型別錯誤。")
+            self.finish_task("stopped")
+            return result
+
+        # ----------------------------------------------------
+        # SpecificationValidator
+        # ----------------------------------------------------
+
+        try:
+
+            result = self.specification_validator.validate(specification)
+
+        except Exception as exc:
+
+            result = {
+                "status": "failed",
+                "passed": False,
+                "failed": True,
+                "errors": ["Specification Validator " f"執行失敗：{exc}"],
+                "warnings": [],
+                "checked": [],
+            }
+
+        # ----------------------------------------------------
+        # Normalize Result
+        # ----------------------------------------------------
+
+        if hasattr(
+            result,
+            "to_dict",
+        ):
+
+            result_data = result.to_dict()
+
+        elif isinstance(
+            result,
+            dict,
+        ):
+
+            result_data = result
+
+        else:
+
+            result_data = {
+                "status": "failed",
+                "passed": False,
+                "failed": True,
+                "errors": ["Specification Validator " "回傳未知結果格式。"],
+                "warnings": [],
+                "checked": [],
+            }
+
+        # ----------------------------------------------------
+        # Runtime State
+        # ----------------------------------------------------
+
+        validation_status = result_data.get(
+            "status",
+            "failed",
+        )
+
+        validation_passed = bool(
+            result_data.get(
+                "passed",
+                validation_status == "passed",
+            )
+        )
+
+        self.task_state["specification_validation_status"] = (
+            "passed" if validation_passed else "failed"
+        )
+
+        self.task_state["specification_validation_result"] = result_data
+
+        # ----------------------------------------------------
+        # Trace
+        # ----------------------------------------------------
+
+        if SHOW_AGENT_TRACE:
+
+            print()
+            print(
+                "🔐 Specification Validation："
+                f"{self.task_state['specification_validation_status']}"
+            )
+
+            checked = result_data.get(
+                "checked",
+                [],
+            )
+
+            if checked:
+
+                print("   Checked：" f"{', '.join(checked)}")
+
+            warnings = result_data.get(
+                "warnings",
+                [],
+            )
+
+            if warnings:
+
+                print("   Warnings：")
+
+                for warning in warnings:
+
+                    print(f"      - {warning}")
+
+            errors = result_data.get(
+                "errors",
+                [],
+            )
+
+            if errors:
+
+                print("   Errors：")
+
+                for error in errors:
+
+                    print(f"      - {error}")
+
+        # ----------------------------------------------------
+        # PASS
+        # ----------------------------------------------------
+
+        if validation_passed:
+
+            return result_data
+
+        # ----------------------------------------------------
+        # FAIL
+        #
+        # Fail Closed
+        #
+        # 非法 Specification 不可以進入 Agent Loop。
+        # ----------------------------------------------------
+
+        self.finish_task("stopped")
+
+        return result_data
 
     # ========================================================
     # Phase 8.3
@@ -2487,6 +2695,51 @@ Agent Final Answer：
 
             self.show_task_specification(task_specification)
 
+            # ====================================================
+            # Phase 8.6
+            #
+            # Specification Validation Gate
+            # ====================================================
+
+            specification_validation = self.validate_task_specification(
+                task_specification
+            )
+
+            # ----------------------------------------------------
+            # Specification Validation FAIL
+            #
+            # 不允許進入 Agent Loop。
+            # ----------------------------------------------------
+
+            if not specification_validation.get(
+                "passed",
+                False,
+            ):
+
+                errors = specification_validation.get(
+                    "errors",
+                    [],
+                )
+
+                if errors:
+
+                    error_text = "; ".join(str(error) for error in errors)
+
+                else:
+
+                    error_text = "Task Specification " "未通過 Validation。"
+
+                return (
+                    "Agent 已停止目前任務："
+                    "Task Specification "
+                    "未通過 Specification Validation。"
+                    f"\n原因：{error_text}"
+                )
+
+            # ----------------------------------------------------
+            # Specification Validation PASS
+            # ----------------------------------------------------
+
             requirements = task_specification.get_verifier_requirements()
 
             self.set_structured_requirements(requirements)
@@ -2495,6 +2748,8 @@ Agent Final Answer：
 
             # ------------------------------------------------
             # Parser Failure
+            #
+            # 保留原本 Phase 8.2 fallback。
             # ------------------------------------------------
 
             requirements = self.extract_requirements(user_input)
