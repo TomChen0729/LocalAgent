@@ -5,24 +5,11 @@ import shutil
 import tempfile
 
 from tools.parsers.markdown_parser import extract_section
-
+from tools.project_context import get_project_path
 # ============================================================
 # Project Sandbox
 # ============================================================
 
-
-def get_project_path() -> Path:
-    """
-    取得 LocalAgent 專案根目錄。
-
-    file_tools.py 位於：
-        LocalAgent/tools/file_tools.py
-
-    因此 parents[1] 就是：
-        LocalAgent/
-    """
-
-    return Path(__file__).resolve().parents[1]
 
 
 # ============================================================

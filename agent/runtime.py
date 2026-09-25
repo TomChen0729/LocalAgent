@@ -23,9 +23,14 @@ from tools.file_tools import (
     edit_file,
     delete_file,
 )
+from pathlib import Path
 
 from tools.command_tools import execute_command
-
+from tools.project_context import (
+    get_project_path,
+    push_project_path,
+    reset_project_path,
+)
 from tools.git_tools import (
     git_status,
     git_diff,
@@ -126,9 +131,13 @@ class AgentRuntime:
     def __init__(
         self,
         model="qwen3:8b",
+        project_path=None,
     ):
         self.model = model
-
+        if project_path is None:
+            self.project_path = get_project_path()
+        else:
+            self.project_path = Path(project_path).resolve()
         # ----------------------------------------------------
         # Phase 8.2
         #
@@ -826,18 +835,17 @@ class AgentRuntime:
         tool_call_or_name,
         arguments=None,
     ):
-        """
-        Tool Dispatcher。
-
-        Tool 的實際執行交由 ToolRunner。
-        Runtime 保留 execute_tool() 作為對外介面，
-        避免修改既有 Agent Loop 與測試。
-        """
-
-        return self.tool_runner.run(
-            tool_call_or_name,
-            arguments,
+        token = push_project_path(
+            self.project_path,
         )
+
+        try:
+            return self.tool_runner.run(
+                tool_call_or_name,
+                arguments,
+            )
+        finally:
+            reset_project_path(token)
 
     # ========================================================
     # Phase 9.3
@@ -855,71 +863,168 @@ class AgentRuntime:
             0,
         )
 
-        recovery_result = self.recovery_manager.handle(
-            original_tool=original_tool,
-            arguments=arguments,
-            tool_result=tool_result,
-            attempt_count=attempt_count,
+        # ========================================================
+        # Project Context
+        #
+        # Recovery Tool 必須使用目前 Runtime 的 Project Root。
+        #
+        # 這裡使用 push/reset，
+        # 避免污染其他 Task 的 Project Context。
+        # ========================================================
+
+        project_context_token = push_project_path(
+            self.project_path,
         )
 
-        # ========================================================
-        # Runtime State
-        # ========================================================
+        try:
 
-        failure = recovery_result.get(
-            "failure",
-            {},
-        )
+            recovery_result = self.recovery_manager.handle(
+                original_tool=original_tool,
+                arguments=arguments,
+                tool_result=tool_result,
+                attempt_count=attempt_count,
+            )
 
-        failure_category = failure.get("category")
+            # ========================================================
+            # Runtime State
+            # ========================================================
 
-        self.task_state["last_recovery_category"] = failure_category
+            failure = recovery_result.get(
+                "failure",
+                {},
+            )
 
-        if not recovery_result.get("attempted"):
-            return recovery_result
+            failure_category = failure.get(
+                "category",
+            )
 
-        # ========================================================
-        # Recovery Attempt State
-        # ========================================================
+            self.task_state["last_recovery_category"] = failure_category
 
-        self.task_state["recovery_attempt_count"] = attempt_count + 1
+            if not recovery_result.get("attempted"):
+                return recovery_result
 
-        execution = recovery_result.get(
-            "execution",
-            {},
-        )
+            # ========================================================
+            # Recovery Attempt State
+            # ========================================================
 
-        recovery_tool = execution.get("tool")
+            self.task_state["recovery_attempt_count"] = attempt_count + 1
 
-        self.task_state["last_recovery_tool"] = recovery_tool
+            execution = recovery_result.get(
+                "execution",
+                {},
+            )
 
-        self.task_state["last_recovery_result"] = execution
+            recovery_tool = execution.get(
+                "tool",
+            )
 
-        # ========================================================
-        # Trace
-        # ========================================================
-
-        if SHOW_AGENT_TRACE:
-
-            print()
-            print("♻️ Runtime：Tool Recovery")
-
-            print("   Original Tool：" f"{original_tool}")
-
-            print("   Failure Category：" f"{failure_category}")
-
-            print("   Alternative Tool：" f"{recovery_tool}")
-
-            arguments_result = recovery_result.get(
+            recovery_arguments = execution.get(
                 "arguments",
                 {},
             )
 
-            print("   Arguments Changed：" f"{arguments_result.get('changed')}")
+            recovery_tool_result = execution.get(
+                "result",
+            )
 
-            print("   Recovery Result：" f"{recovery_result.get('recovered')}")
+            self.task_state["last_recovery_tool"] = recovery_tool
 
-        return recovery_result
+            self.task_state["last_recovery_result"] = execution
+
+            # ========================================================
+            # Recovery Verification
+            # ========================================================
+
+            if recovery_result.get("recovered"):
+
+                verification = self.verify_recovery_result(
+                    tool_name=recovery_tool,
+                    arguments=recovery_arguments,
+                    tool_result=recovery_tool_result,
+                )
+
+                recovery_result["verification"] = verification
+
+                requirement_verification = self.verify_current_requirements()
+
+                recovery_result["requirement_verification"] = requirement_verification
+
+            # ========================================================
+            # Trace
+            # ========================================================
+
+            if SHOW_AGENT_TRACE:
+
+                print()
+                print("♻️ Runtime：Tool Recovery")
+
+                print("   Original Tool：" f"{original_tool}")
+
+                print("   Failure Category：" f"{failure_category}")
+
+                print("   Alternative Tool：" f"{recovery_tool}")
+
+                arguments_result = recovery_result.get(
+                    "arguments",
+                    {},
+                )
+
+                print("   Arguments Changed：" f"{arguments_result.get('changed')}")
+
+                print("   Recovery Result：" f"{recovery_result.get('recovered')}")
+
+            return recovery_result
+
+        finally:
+
+            # ========================================================
+            # Restore Project Context
+            # ========================================================
+
+            reset_project_path(
+                project_context_token,
+            )
+
+
+    def verify_recovery_result(
+        self,
+        tool_name,
+        arguments,
+        tool_result,
+    ):
+        """
+        將 Recovery Tool Result
+        接入既有 Verification Pipeline。
+
+        RecoveryManager 不負責 Verification；
+        Runtime 在 Recovery 成功後負責 orchestration。
+        """
+
+        if not self.needs_verification(
+            tool_name,
+        ):
+            return {
+                "status": "not_required",
+                "verification_tool": None,
+                "result": None,
+            }
+
+        verification = self.verify_tool_result(
+            tool_name,
+            arguments,
+            tool_result,
+        )
+
+        self.update_verification_state(
+            verification,
+        )
+
+        self.add_verification_context(
+            tool_name,
+            verification,
+        )
+
+        return verification
 
     # ========================================================
     # Tool Status
