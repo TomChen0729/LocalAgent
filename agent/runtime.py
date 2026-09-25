@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import json
 import os
 import re
@@ -18,6 +16,7 @@ from tools.file_tools import (
     list_files,
     file_exists,
     read_file,
+    read_section,
     write_file,
     create_directory,
     search_files,
@@ -57,6 +56,36 @@ from requirements.output_verifier import (
 )
 
 from agent.permissions import PermissionManager
+from agent.state import (
+    create_task_state,
+    start_task,
+    finish_task,
+    update_task_state,
+)
+from agent.tool_runner import ToolRunner
+from agent.failure_classifier import (
+    classify_failure,
+)
+
+from agent.recovery_policy import (
+    RecoveryPolicy,
+)
+
+from agent.recovery_selector import (
+    RecoverySelector,
+)
+
+from agent.recovery_executor import (
+    RecoveryExecutor,
+)
+
+from agent.recovery_attempt import (
+    RecoveryAttemptPolicy,
+)
+
+from agent.recovery_arguments import (
+    RecoveryArgumentAdapter,
+)
 
 # ============================================================
 # Agent Runtime Configuration
@@ -142,7 +171,29 @@ class AgentRuntime:
         self.permission_manager = PermissionManager(
             permission_callback=self._permission_callback,
         )
+        self.tool_runner = ToolRunner(
+            tools=self._build_tool_registry(),
+            permission_manager=self.permission_manager,
+            constraint_checker=self.check_tool_constraints,
+            constraint_result_handler=self.show_tool_constraint_result,
+        )
+        # ----------------------------------------------------
+        # Phase 9.3
+        #
+        # Recovery Components
+        # ----------------------------------------------------
 
+        self.recovery_policy = RecoveryPolicy()
+
+        self.recovery_selector = RecoverySelector()
+
+        self.recovery_executor = RecoveryExecutor(
+            self.tool_runner,
+        )
+
+        self.recovery_attempt_policy = RecoveryAttemptPolicy()
+
+        self.recovery_argument_adapter = RecoveryArgumentAdapter()
         # ----------------------------------------------------
         # LLM Messages
         # ----------------------------------------------------
@@ -166,61 +217,88 @@ class AgentRuntime:
         # ----------------------------------------------------
         # Task State
         # ----------------------------------------------------
-        self.task_state = self._create_task_state()
+        self.task_state = create_task_state()
 
-    # ========================================================
-    # Task State Factory
-    # ========================================================
-
-    def _create_task_state(
-        self,
-        user_input=None,
-        status="idle",
-    ):
+    def _build_tool_registry(self):
         """
-        建立 Task State。
+        建立 Agent Tool Registry。
 
-        集中管理 Task State 的初始化，
-        避免 __init__ 與 start_task()
-        出現不同欄位。
+        使用 wrapper，而不是直接保存 module-level
+        function reference。
+
+        這樣可以保持：
+        - Runtime 測試中的 monkeypatch
+        - Tool replacement
+        - Tool mocking
+        - 未來 Tool 動態替換
+
+        的相容性。
         """
 
         return {
-            "status": status,
-            "user_input": user_input,
-            "started_at": None,
-            "finished_at": None,
-            # Tool
-            "tool_calls": 0,
-            "last_tool": None,
-            "last_result": None,
-            # Phase 4.6
-            "verification_required": False,
-            "verification_status": None,
-            "verification_tool": None,
-            "verification_result": None,
-            # Phase 4.7
-            "requirement_status": None,
-            "requirement_result": None,
-            # Phase 4.8
-            "requirements": [],
-            "requirement_verification": None,
-            # Phase 8.2
-            "task_specification": None,
-            "parser_status": None,
-            "parser_error": None,
-            # Phase 8.6
-            "specification_validation_status": None,
-            "specification_validation_result": None,
-            # Phase 8.4
-            "requirement_failure_count": 0,
-            "requirement_progress_since_failure": False,
-            "last_requirement_signature": None,
-            # Phase 8.5
-            "output_verification_status": None,
-            "output_verification_result": None,
-            "output_verification_failure_count": 0,
+            # -------------------------------------------------
+            # File Tools
+            # -------------------------------------------------
+            "list_files": lambda **kwargs: list_files(**kwargs),
+            "file_exists": lambda **kwargs: file_exists(**kwargs),
+            "read_file": lambda **kwargs: read_file(**kwargs),
+            "read_section": lambda **kwargs: read_section(**kwargs),
+            "write_file": lambda **kwargs: write_file(**kwargs),
+            "create_directory": lambda **kwargs: create_directory(**kwargs),
+            "search_files": lambda **kwargs: search_files(**kwargs),
+            "edit_file": lambda **kwargs: edit_file(**kwargs),
+            "delete_file": lambda **kwargs: delete_file(**kwargs),
+            # -------------------------------------------------
+            # Command Tool
+            # -------------------------------------------------
+            "execute_command": self._execute_command_tool,
+            # -------------------------------------------------
+            # Git Tools
+            # -------------------------------------------------
+            "git_status": lambda **kwargs: git_status(),
+            "git_diff": lambda **kwargs: git_diff(),
+            "git_log": self._git_log_tool,
+            "git_commit": self._git_commit_tool,
         }
+
+    def _execute_command_tool(
+        self,
+        program="",
+        arguments=None,
+        timeout=60,
+    ):
+        """
+        Command Tool Adapter。
+        """
+
+        if arguments is None:
+            arguments = []
+
+        return execute_command(
+            program=program,
+            arguments=arguments,
+            timeout=timeout,
+        )
+
+    def _git_log_tool(
+        self,
+        limit=10,
+    ):
+        """
+        Git Log Tool Adapter。
+        """
+
+        return git_log(limit)
+
+    def _git_commit_tool(
+        self,
+        message="",
+    ):
+        """
+        Git Commit Tool Adapter。
+        """
+
+        return git_commit(message)
 
     # ========================================================
     # Phase 5
@@ -267,12 +345,10 @@ class AgentRuntime:
         self.tool_call_count = 0
         self.tool_history = []
 
-        self.task_state = self._create_task_state(
-            user_input=user_input,
-            status="running",
+        start_task(
+            self.task_state,
+            user_input,
         )
-
-        self.task_state["started_at"] = datetime.now().isoformat()
 
     def finish_task(
         self,
@@ -280,15 +356,12 @@ class AgentRuntime:
     ):
         """
         結束目前 Task。
-
-        status:
-            completed
-            failed
-            stopped
         """
 
-        self.task_state["status"] = status
-        self.task_state["finished_at"] = datetime.now().isoformat()
+        finish_task(
+            self.task_state,
+            status,
+        )
 
     def update_task_state(
         self,
@@ -299,9 +372,12 @@ class AgentRuntime:
         Tool 執行完成後更新 Task State。
         """
 
-        self.task_state["tool_calls"] = self.tool_call_count
-        self.task_state["last_tool"] = tool_name
-        self.task_state["last_result"] = tool_result
+        update_task_state(
+            self.task_state,
+            self.tool_call_count,
+            tool_name,
+            tool_result,
+        )
 
     # ========================================================
     # Phase 8.2
@@ -781,270 +857,241 @@ class AgentRuntime:
         """
         Tool Dispatcher。
 
-        相容：
-
-        1.
-            execute_tool(tool_call)
-
-        2.
-            execute_tool(tool_name, arguments)
+        Tool 的實際執行交由 ToolRunner。
+        Runtime 保留 execute_tool() 作為對外介面，
+        避免修改既有 Agent Loop 與測試。
         """
 
-        # ====================================================
-        # 1. Normalize Tool Call
-        # ====================================================
-
-        tool_call = None
-
-        if isinstance(
+        return self.tool_runner.run(
             tool_call_or_name,
-            str,
-        ):
-
-            tool_name = tool_call_or_name
-
-        else:
-
-            tool_call = tool_call_or_name
-
-            try:
-
-                tool_name = tool_call.function.name
-
-            except AttributeError:
-
-                return {
-                    "success": False,
-                    "error": "invalid_tool_call",
-                    "message": "無法解析 Tool Call。",
-                }
-
-            if arguments is None:
-
-                try:
-
-                    arguments = tool_call.function.arguments
-
-                except AttributeError:
-
-                    arguments = {}
-
-        # ====================================================
-        # 2. Normalize Arguments
-        # ====================================================
-
-        if arguments is None:
-            arguments = {}
-
-        if isinstance(
             arguments,
-            str,
-        ):
+        )
 
-            try:
+    # ========================================================
+    # Phase 9.3
+    # Recovery Orchestration
+    # ========================================================
 
-                arguments = json.loads(arguments)
+    def attempt_tool_recovery(
+        self,
+        original_tool,
+        arguments,
+        tool_result,
+    ):
+        """
+        嘗試針對 Tool Failure 執行 Alternative Tool Recovery。
 
-            except json.JSONDecodeError:
+        Runtime 只負責 orchestration：
 
-                return {
-                    "success": False,
-                    "error": "invalid_arguments",
-                    "message": "Tool arguments 不是有效 JSON。",
-                    "tool": tool_name,
-                }
+            Failure Classification
+                    ↓
+            Recovery Policy
+                    ↓
+            Recovery Selection
+                    ↓
+            Recovery Attempt Control
+                    ↓
+            Argument Transformation
+                    ↓
+            Recovery Execution
+
+        實際 Tool 執行仍然交給 ToolRunner。
+        """
+
+        # ----------------------------------------------------
+        # 1. Failure Classification
+        # ----------------------------------------------------
+
+        classification = classify_failure(
+            tool_result,
+        )
+
+        if SHOW_AGENT_TRACE:
+
+            print()
+
+            print(
+                "🧭 Runtime："
+                "Failure Classification"
+            )
+
+            print(
+                "   Failed："
+                f"{classification.failed}"
+            )
+
+            print(
+                "   Category："
+                f"{classification.category.value}"
+            )
+
+            print(
+                "   Retryable："
+                f"{classification.retryable}"
+            )
+
+        if not classification.failed:
+
+            return {
+                "recovered": False,
+                "attempted": False,
+                "original_tool": original_tool,
+                "failure": classification.to_dict(),
+                "reason": "Tool Result 沒有被判定為 Failure。",
+            }
+
+        failure_category = classification.category
+
+        self.task_state["last_recovery_category"] = failure_category.value
+
+        # ----------------------------------------------------
+        # 2. Recovery Policy
+        # ----------------------------------------------------
+
+        decision = self.recovery_policy.decide(
+            original_tool,
+            failure_category,
+        )
+
+        if not decision.should_recover:
+
+            return {
+                "recovered": False,
+                "attempted": False,
+                "original_tool": original_tool,
+                "failure": classification.to_dict(),
+                "recovery": decision.to_dict(),
+                "reason": decision.reason,
+            }
+
+        # ----------------------------------------------------
+        # 3. Recovery Attempt Limit
+        # ----------------------------------------------------
+
+        attempt_count = self.task_state.get(
+            "recovery_attempt_count",
+            0,
+        )
+
+        attempt_decision = self.recovery_attempt_policy.can_recover(
+            attempt_count,
+        )
+
+        if not attempt_decision.should_recover:
+
+            return {
+                "recovered": False,
+                "attempted": False,
+                "original_tool": original_tool,
+                "failure": classification.to_dict(),
+                "recovery": decision.to_dict(),
+                "attempt": attempt_decision.to_dict(),
+                "reason": attempt_decision.reason,
+            }
+
+        # ----------------------------------------------------
+        # 4. Select Alternative Tool
+        # ----------------------------------------------------
+
+        selection = self.recovery_selector.select(
+            decision.alternatives,
+        )
+
+        if not selection.selected:
+
+            return {
+                "recovered": False,
+                "attempted": False,
+                "original_tool": original_tool,
+                "failure": classification.to_dict(),
+                "recovery": decision.to_dict(),
+                "selection": selection.to_dict(),
+                "reason": selection.reason,
+            }
+
+        alternative_tool = selection.selected_tool
+
+        # ----------------------------------------------------
+        # 5. Transform Arguments
+        # ----------------------------------------------------
+
+        transformed = self.recovery_argument_adapter.transform(
+            original_tool,
+            alternative_tool,
+            arguments,
+        )
+
+        # ----------------------------------------------------
+        # 5.5 Validate Transformed Arguments
+        # ----------------------------------------------------
 
         if not isinstance(
-            arguments,
+            transformed.transformed_arguments,
             dict,
         ):
 
             return {
-                "success": False,
-                "error": "invalid_arguments",
-                "message": "Tool arguments 必須是 object。",
-                "tool": tool_name,
+                "recovered": False,
+                "attempted": False,
+                "original_tool": original_tool,
+                "failure": classification.to_dict(),
+                "recovery": decision.to_dict(),
+                "selection": selection.to_dict(),
+                "arguments": transformed.to_dict(),
+                "reason": (
+                    "Recovery Arguments Transformation "
+                    "產生無效的 arguments。"
+                ),
             }
 
-        # ====================================================
-        # Phase 8.3
-        # Task Tool Constraint Check
-        # ====================================================
+        # ----------------------------------------------------
+        # 6. Register Recovery Attempt
+        # ----------------------------------------------------
 
-        (
-            constraint_allowed,
-            constraint_message,
-        ) = self.check_tool_constraints(tool_name)
+        self.task_state["recovery_attempt_count"] = attempt_count + 1
 
-        self.show_tool_constraint_result(
-            tool_name,
-            constraint_allowed,
-            constraint_message,
+        self.task_state["last_recovery_tool"] = alternative_tool
+
+        # ----------------------------------------------------
+        # 7. Execute Alternative Tool
+        # ----------------------------------------------------
+
+        execution = self.recovery_executor.execute(
+            alternative_tool,
+            transformed.transformed_arguments,
         )
 
-        if not constraint_allowed:
+        self.task_state["last_recovery_result"] = execution.to_dict()
 
-            return {
-                "success": False,
-                "error": "tool_constraint_denied",
-                "message": constraint_message,
-                "tool": tool_name,
-            }
+        # ----------------------------------------------------
+        # 8. Runtime Trace
+        # ----------------------------------------------------
 
-        # ====================================================
-        # Phase 5
-        # Permission Check
-        # ====================================================
+        if SHOW_AGENT_TRACE:
 
-        try:
+            print()
+            print("♻️ Runtime：Tool Recovery")
 
-            permission_result = self.permission_manager.check_permission(
-                tool_name,
-                arguments,
-            )
+            print("   Original Tool：" f"{original_tool}")
 
-        except Exception as exc:
+            print("   Failure Category：" f"{failure_category.value}")
 
-            return {
-                "success": False,
-                "error": "permission_check_failed",
-                "message": f"Permission Check 執行失敗：{exc}",
-                "tool": tool_name,
-            }
+            print("   Alternative Tool：" f"{alternative_tool}")
 
-        # ====================================================
-        # Permission Denied
-        # ====================================================
+            print("   Arguments Changed：" f"{transformed.changed}")
 
-        if not permission_result.allowed:
+            print("   Recovery Result：" f"{execution.success}")
 
-            return {
-                "success": False,
-                "error": "permission_denied",
-                "message": permission_result.message,
-                "tool": tool_name,
-            }
-
-        # ====================================================
-        # Permission Allowed
-        # ====================================================
-
-        try:
-
-            # ------------------------------------------------
-            # File Tools
-            # ------------------------------------------------
-
-            if tool_name == "list_files":
-
-                result = list_files(**arguments)
-
-            elif tool_name == "file_exists":
-
-                result = file_exists(**arguments)
-
-            elif tool_name == "read_file":
-
-                result = read_file(**arguments)
-
-            elif tool_name == "write_file":
-
-                result = write_file(**arguments)
-
-            elif tool_name == "create_directory":
-
-                result = create_directory(**arguments)
-
-            elif tool_name == "search_files":
-
-                result = search_files(**arguments)
-
-            elif tool_name == "edit_file":
-
-                result = edit_file(**arguments)
-
-            elif tool_name == "delete_file":
-
-                result = delete_file(**arguments)
-
-            # ------------------------------------------------
-            # Command Tools
-            # ------------------------------------------------
-
-            elif tool_name == "execute_command":
-
-                result = execute_command(
-                    program=arguments.get(
-                        "program",
-                        "",
-                    ),
-                    arguments=arguments.get(
-                        "arguments",
-                        [],
-                    ),
-                    timeout=arguments.get(
-                        "timeout",
-                        60,
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Git Tools
-            # ------------------------------------------------
-
-            elif tool_name == "git_status":
-
-                result = git_status()
-
-            elif tool_name == "git_diff":
-
-                result = git_diff()
-
-            elif tool_name == "git_log":
-
-                result = git_log(
-                    arguments.get(
-                        "limit",
-                        10,
-                    )
-                )
-
-            elif tool_name == "git_commit":
-
-                result = git_commit(
-                    arguments.get(
-                        "message",
-                        "",
-                    )
-                )
-
-            # ------------------------------------------------
-            # Unknown Tool
-            # ------------------------------------------------
-
-            else:
-
-                return {
-                    "success": False,
-                    "error": "unknown_tool",
-                    "message": f"未知 Tool：{tool_name}",
-                    "tool": tool_name,
-                }
-
-            # ------------------------------------------------
-            # Normalize Tool Result
-            # ------------------------------------------------
-
-            return result
-
-        except Exception as exc:
-
-            return {
-                "success": False,
-                "error": "tool_execution_failed",
-                "message": f"Tool 執行失敗：{exc}",
-                "tool": tool_name,
-            }
+        return {
+            "recovered": execution.success,
+            "attempted": True,
+            "original_tool": original_tool,
+            "failure": classification.to_dict(),
+            "recovery": decision.to_dict(),
+            "selection": selection.to_dict(),
+            "arguments": transformed.to_dict(),
+            "execution": execution.to_dict(),
+        }
 
     # ========================================================
     # Tool Status
@@ -1059,6 +1106,7 @@ class AgentRuntime:
             "list_files": "需要確認目前專案的檔案與資料夾結構。",
             "file_exists": "需要確認指定路徑是否存在。",
             "read_file": "需要讀取指定檔案的實際內容。",
+            "read_section": "需要讀取指定檔案中的特定章節。",
             "write_file": "需要建立或修改指定檔案。",
             "create_directory": "需要建立指定的資料夾。",
             "search_files": "需要搜尋專案中的檔案內容。",
@@ -2940,6 +2988,233 @@ Agent Final Answer：
                             "content": str(tool_result),
                         }
                     )
+
+                    # =================================================
+                    # Phase 9.3
+                    # Tool Failure Recovery
+                    # =================================================
+                    #
+                    # 原始 Tool Failure
+                    #       ↓
+                    # Failure Classification
+                    #       ↓
+                    # Recovery Policy
+                    #       ↓
+                    # Recovery Selector
+                    #       ↓
+                    # Recovery Attempt Policy
+                    #       ↓
+                    # Recovery Argument Adapter
+                    #       ↓
+                    # Recovery Executor
+                    #       ↓
+                    # ToolRunner
+                    #
+                    # 注意：
+                    # Recovery 不是取代原始 Tool Result。
+                    #
+                    # 原始 Tool Result 仍然保留在 LLM Context。
+                    # Recovery Result 則額外加入 Context。
+                    # =================================================
+
+                    recovery_result = self.attempt_tool_recovery(
+                        original_tool=tool_name,
+                        arguments=arguments,
+                        tool_result=tool_result,
+                    )
+
+                    # -------------------------------------------------
+                    # Recovery Attempted
+                    # -------------------------------------------------
+
+                    if recovery_result.get("attempted"):
+
+                        recovery_tool = recovery_result.get(
+                            "execution",
+                            {},
+                        ).get("tool")
+
+                        recovery_tool_arguments = recovery_result.get(
+                            "arguments",
+                            {},
+                        ).get(
+                            "transformed_arguments",
+                            {},
+                        )
+
+                        recovery_execution = recovery_result.get(
+                            "execution",
+                            {},
+                        )
+
+                        recovery_tool_result = recovery_execution.get("result")
+
+                        # ---------------------------------------------
+                        # Recovery Tool History
+                        # ---------------------------------------------
+
+                        self.tool_history.append(
+                            {
+                                "tool_name": recovery_tool,
+                                "arguments": recovery_tool_arguments,
+                                "result": recovery_tool_result,
+                                "recovery": True,
+                                "original_tool": tool_name,
+                            }
+                        )
+
+                        # ---------------------------------------------
+                        # Recovery Task State
+                        # ---------------------------------------------
+
+                        self.update_task_state(
+                            recovery_tool,
+                            recovery_tool_result,
+                        )
+
+                        # ---------------------------------------------
+                        # Recovery Progress
+                        # ---------------------------------------------
+
+                        if self.task_state["requirements"]:
+
+                            self.register_requirement_progress(
+                                recovery_tool,
+                                recovery_tool_result,
+                            )
+
+                        # ---------------------------------------------
+                        # Recovery Result → LLM
+                        # ---------------------------------------------
+
+                        recovery_message = (
+                            "TOOL RECOVERY RESULT\n"
+                            f"Original Tool: {tool_name}\n"
+                            f"Original Tool Result:\n"
+                            f"{tool_result}\n\n"
+                            f"Recovery Tool: {recovery_tool}\n"
+                            f"Recovery Result:\n"
+                            f"{recovery_tool_result}\n\n"
+                            f"Recovery Status: "
+                            f"{'SUCCESS' if recovery_result.get('recovered') else 'FAILED'}"
+                        )
+
+                        self.messages.append(
+                            {
+                                "role": "system",
+                                "content": recovery_message,
+                            }
+                        )
+
+                        if SHOW_AGENT_TRACE:
+
+                            print()
+
+                            print("♻️ Runtime：" "Recovery 已加入 Agent Context")
+
+                            print("   Recovery Tool：" f"{recovery_tool}")
+
+                            print(
+                                "   Recovery Status："
+                                f"{'SUCCESS' if recovery_result.get('recovered') else 'FAILED'}"
+                            )
+
+                        # ---------------------------------------------
+                        # Recovery Tool Verification
+                        # ---------------------------------------------
+                        #
+                        # Recovery Tool 本身也必須遵守原本的
+                        # Verification Pipeline。
+                        #
+                        # 例如：
+                        #
+                        # read_section 失敗
+                        #      ↓
+                        # read_file Recovery
+                        #      ↓
+                        # read_file 成功
+                        #
+                        # read_file 不需要 Verification，
+                        # 所以直接繼續。
+                        #
+                        # 如果未來 Recovery Tool 是
+                        # write_file / edit_file 等，
+                        # 則會進入正常 Verification。
+                        # ---------------------------------------------
+
+                        if recovery_tool and self.needs_verification(recovery_tool):
+
+                            if SHOW_AGENT_TRACE:
+
+                                print()
+
+                                print("🔍 Runtime：" "Recovery Tool 需要結果驗證。")
+
+                            recovery_verification = self.verify_tool_result(
+                                recovery_tool,
+                                recovery_tool_arguments,
+                                recovery_tool_result,
+                            )
+
+                            self.update_verification_state(recovery_verification)
+
+                            self.show_verification_result(recovery_verification)
+
+                            self.add_verification_context(
+                                recovery_tool,
+                                recovery_verification,
+                            )
+
+                            # -----------------------------------------
+                            # Recovery Requirement Verification
+                            # -----------------------------------------
+
+                            if (
+                                recovery_verification["status"] == "verified"
+                                and self.task_state["requirements"]
+                            ):
+
+                                recovery_requirement_result = (
+                                    self.verify_current_requirements()
+                                )
+
+                                self.show_requirement_result(
+                                    recovery_requirement_result
+                                )
+
+                                self.add_requirement_verification_context(
+                                    recovery_requirement_result
+                                )
+
+                                if SHOW_AGENT_TRACE:
+
+                                    print()
+
+                                    print(
+                                        "🧠 Runtime："
+                                        "Recovery Requirement "
+                                        f"{recovery_requirement_result['status']}"
+                                    )
+
+                                if recovery_requirement_result["status"] == "failed":
+
+                                    should_continue = self.handle_requirement_failure(
+                                        recovery_requirement_result
+                                    )
+
+                                    if not should_continue:
+
+                                        return (
+                                            "Agent 已停止目前任務："
+                                            "Recovery 後 Requirement "
+                                            "仍持續未完成，"
+                                            "且 Runtime 未偵測到有效進展，"
+                                            "因此停止以避免無限循環。"
+                                        )
+
+                                else:
+
+                                    self.reset_requirement_failure_state()
 
                     # =========================================
                     # Phase 4.6

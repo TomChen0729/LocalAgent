@@ -37,16 +37,78 @@ tools = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "讀取指定檔案內容。",
+            "description": (
+                "讀取指定檔案內容。"
+                "如果只需要檔案的特定區域，"
+                "可以使用 start_line 與 end_line。"
+                "當使用者指定明確的 Section 時，"
+                "優先使用 read_section。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "要讀取的檔案路徑。",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": ("開始讀取的行號，從 1 開始。"),
+                        "minimum": 1,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": ("結束讀取的行號。"),
+                        "minimum": 1,
+                    },
+                    "max_size": {
+                        "type": "integer",
+                        "description": ("允許讀取的最大檔案大小，" "預設為 2 MB。"),
+                        "minimum": 1,
+                        "maximum": 20971520,
+                    },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_section",
+            "description": (
+                "讀取 Markdown 檔案中的指定 Section。"
+                "當使用者明確指定某個章節、標題或 Heading 時，"
+                "優先使用此工具，而不是讀取整份檔案。"
+                "工具會自動找到指定 Heading，"
+                "並讀取到下一個同層級或更高層級 Heading 之前。"
+                "例如：# 28. Development Roadmap。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": ("Markdown 檔案路徑，" "例如 README.md。"),
+                    },
+                    "heading": {
+                        "type": "string",
+                        "description": (
+                            "要讀取的 Markdown Heading。"
+                            "例如 # 28. Development Roadmap。"
+                        ),
+                    },
+                    "max_size": {
+                        "type": "integer",
+                        "description": ("允許讀取的最大檔案大小，" "預設為 2 MB。"),
+                        "minimum": 1,
+                        "maximum": 20971520,
+                    },
+                },
+                "required": [
+                    "path",
+                    "heading",
+                ],
             },
         },
     },

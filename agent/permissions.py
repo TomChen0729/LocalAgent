@@ -46,6 +46,7 @@ class PermissionManager:
         "file_exists": "read",
         "read_file": "read",
         "search_files": "read",
+        "read_section": "read",
         "write_file": "write",
         "edit_file": "edit",
         "create_directory": "write",

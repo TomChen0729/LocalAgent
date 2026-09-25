@@ -4,6 +4,8 @@ import os
 import shutil
 import tempfile
 
+from tools.parsers.markdown_parser import extract_section
+
 # ============================================================
 # Project Sandbox
 # ============================================================
@@ -180,14 +182,14 @@ def list_files(
     try:
 
         if recursive:
-
             iterator = safe_path.rglob("*")
-
         else:
-
             iterator = safe_path.iterdir()
 
-        for item in sorted(iterator, key=lambda p: str(p).lower()):
+        for item in sorted(
+            iterator,
+            key=lambda p: str(p).lower(),
+        ):
 
             if is_ignored_path(item):
                 continue
@@ -203,11 +205,9 @@ def list_files(
             relative = get_relative_path(item)
 
             if item.is_dir():
-
                 results.append(f"[DIR]  {relative}")
 
             elif item.is_file():
-
                 results.append(f"[FILE] {relative}")
 
         if not results:
@@ -302,20 +302,166 @@ def read_file(
 
         numbered_lines = []
 
-        for index, line in enumerate(selected_lines, start=start_line):
-
+        for index, line in enumerate(
+            selected_lines,
+            start=start_line,
+        ):
             numbered_lines.append(f"{index}: {line}")
 
         return "\n".join(numbered_lines)
 
     except UnicodeDecodeError:
-        return f"錯誤：{path} 不是 UTF-8 文字檔案，" f"目前 File Tool 不支援此編碼。"
+        return f"錯誤：{path} 不是 UTF-8 " f"文字檔案，目前 File Tool 不支援此編碼。"
 
     except PermissionError:
         return f"錯誤：沒有權限讀取 {path}"
 
     except OSError as e:
         return f"錯誤：讀取檔案時發生問題：{e}"
+
+
+# ============================================================
+# Read Markdown Section
+# ============================================================
+
+
+def read_section(
+    path: str,
+    heading: str,
+    max_size: int = DEFAULT_MAX_FILE_SIZE,
+) -> str:
+    """
+    讀取 Markdown 檔案中的指定 Section。
+
+    File Tool 負責：
+
+        - Safe Path
+        - File existence
+        - File type
+        - Ignored path
+        - File size
+        - UTF-8 reading
+
+    Markdown Parser 負責：
+
+        - Markdown Heading parsing
+        - Heading normalization
+        - Section boundary detection
+        - Section extraction
+
+    例如：
+
+        read_section(
+            "README.md",
+            "Project Structure"
+        )
+
+    也可以使用：
+
+        read_section(
+            "README.md",
+            "3. Project Structure"
+        )
+
+    或：
+
+        read_section(
+            "README.md",
+            "## 3. Project Structure"
+        )
+
+    實際的 Markdown heading 會交給：
+
+        tools/parsers/markdown_parser.py
+
+    處理。
+    """
+
+    # --------------------------------------------------------
+    # 1. Resolve safe path
+    # --------------------------------------------------------
+
+    safe_path, error = resolve_safe_path(path)
+
+    if error:
+        return error
+
+    # --------------------------------------------------------
+    # 2. Check file existence
+    # --------------------------------------------------------
+
+    if not safe_path.exists():
+        return f"錯誤：找不到檔案 {path}"
+
+    # --------------------------------------------------------
+    # 3. Check whether path is a file
+    # --------------------------------------------------------
+
+    if not safe_path.is_file():
+        return f"錯誤：{path} 不是檔案。"
+
+    # --------------------------------------------------------
+    # 4. Check ignored path
+    # --------------------------------------------------------
+
+    if is_ignored_path(safe_path):
+        return f"錯誤：禁止讀取 {path}"
+
+    # --------------------------------------------------------
+    # 5. Validate heading
+    # --------------------------------------------------------
+
+    if not isinstance(heading, str):
+        return "錯誤：heading 必須是字串。"
+
+    heading = heading.strip()
+
+    if not heading:
+        return "錯誤：heading 不可以是空字串。"
+
+    # --------------------------------------------------------
+    # 6. Read file
+    # --------------------------------------------------------
+
+    try:
+
+        file_size = safe_path.stat().st_size
+
+        if file_size > max_size:
+            return (
+                "錯誤：檔案過大，無法讀取 Section。\n"
+                f"檔案大小：{file_size:,} bytes\n"
+                f"限制大小：{max_size:,} bytes"
+            )
+
+        content = safe_path.read_text(encoding="utf-8")
+
+        # ----------------------------------------------------
+        # 7. Delegate Markdown parsing
+        # ----------------------------------------------------
+
+        result = extract_section(
+            content=content,
+            heading=heading,
+        )
+
+        # ----------------------------------------------------
+        # 8. Parser result
+        # ----------------------------------------------------
+
+        if result.startswith("錯誤："):
+            return f"{result}\n" f"檔案：{path}"
+
+        return result
+
+    except UnicodeDecodeError:
+        return f"錯誤：{path} 不是 UTF-8 " f"文字檔案，目前 File Tool 不支援此編碼。"
+
+    except PermissionError:
+        return f"錯誤：沒有權限讀取 {path}"
+
+    except OSError as e:
+        return f"錯誤：讀取 Section 時發生問題：{e}"
 
 
 # ============================================================
@@ -349,13 +495,16 @@ def write_file(
     if is_ignored_path(safe_path):
         return f"錯誤：禁止寫入 {path}"
 
-    if safe_path.exists():
+    existed_before = safe_path.exists()
+
+    if existed_before:
 
         if not overwrite:
             return (
                 f"錯誤：檔案 {path} 已存在。\n"
                 f"write_file 預設禁止覆寫既有檔案。\n"
-                f"如果確定要完整覆寫，必須指定 overwrite=True。"
+                f"如果確定要完整覆寫，"
+                f"必須指定 overwrite=True。"
             )
 
         if not safe_path.is_file():
@@ -393,13 +542,21 @@ def write_file(
 
         try:
 
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as temp_file:
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8",
+                newline="",
+            ) as temp_file:
 
                 temp_file.write(content)
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
 
-            os.replace(temp_path, safe_path)
+            os.replace(
+                temp_path,
+                safe_path,
+            )
 
         finally:
 
@@ -410,11 +567,12 @@ def write_file(
                 except OSError:
                     pass
 
-        action = "覆寫" if safe_path.exists() else "建立"
+        action = "覆寫" if existed_before else "建立"
 
         return (
             f"成功：已{action}檔案 {path}\n"
-            f"大小：{len(content.encode('utf-8')):,} bytes"
+            f"大小："
+            f"{len(content.encode('utf-8')):,} bytes"
         )
 
     except PermissionError:
@@ -453,7 +611,10 @@ def create_directory(path: str) -> str:
 
             return f"錯誤：{path} 已存在，" f"但不是資料夾。"
 
-        safe_path.mkdir(parents=True, exist_ok=False)
+        safe_path.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
 
         return f"成功：已建立資料夾 {path}"
 
@@ -555,12 +716,19 @@ def search_files(
             ):
                 continue
 
-            for line_number, line in enumerate(content.splitlines(), start=1):
+            for (
+                line_number,
+                line,
+            ) in enumerate(
+                content.splitlines(),
+                start=1,
+            ):
 
                 if query_lower in line.lower():
 
                     relative_path = str(file_path.relative_to(project_path)).replace(
-                        "\\", "/"
+                        "\\",
+                        "/",
                     )
 
                     results.append(
@@ -575,8 +743,7 @@ def search_files(
                         )
 
         if not results:
-
-            return f"找不到包含「{query}」的內容。"
+            return f"找不到包含「{query}」" f"的內容。"
 
         return "\n".join(results)
 
@@ -653,20 +820,26 @@ def edit_file(
         occurrence_count = content.count(old_text)
 
         if occurrence_count == 0:
-
             return f"錯誤：在 {path} 中找不到 " f"old_text，未進行任何修改。"
 
         if occurrence_count > 1:
-
             return (
                 f"錯誤：old_text 在 {path} "
                 f"中出現 {occurrence_count} 次。\n"
-                f"為避免錯誤修改，未進行任何修改。"
+                f"為避免錯誤修改，"
+                f"未進行任何修改。"
             )
 
-        new_content = content.replace(old_text, new_text, 1)
+        new_content = content.replace(
+            old_text,
+            new_text,
+            1,
+        )
 
+        # ----------------------------------------------------
         # Atomic Write
+        # ----------------------------------------------------
+
         parent = safe_path.parent
 
         fd, temp_path = tempfile.mkstemp(
@@ -678,13 +851,21 @@ def edit_file(
 
         try:
 
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as temp_file:
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8",
+                newline="",
+            ) as temp_file:
 
                 temp_file.write(new_content)
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
 
-            os.replace(temp_path, safe_path)
+            os.replace(
+                temp_path,
+                safe_path,
+            )
 
         finally:
 
@@ -731,7 +912,8 @@ def delete_file(
     if confirm is not True:
         return (
             "錯誤：delete_file 是高風險操作。\n"
-            "必須明確指定 confirm=True 才能刪除檔案。"
+            "必須明確指定 confirm=True "
+            "才能刪除檔案。"
         )
 
     safe_path, error = resolve_safe_path(path)
@@ -743,7 +925,7 @@ def delete_file(
         return f"錯誤：找不到檔案 {path}"
 
     if not safe_path.is_file():
-        return f"錯誤：delete_file 只允許刪除檔案，" f"不允許刪除資料夾。"
+        return "錯誤：delete_file 只允許刪除檔案，" "不允許刪除資料夾。"
 
     if is_ignored_path(safe_path):
         return f"錯誤：禁止刪除 {path}"
