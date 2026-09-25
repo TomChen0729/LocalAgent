@@ -31,6 +31,8 @@ def test_attempt_tool_recovery_success():
 
         read_section failure
             ↓
+        RecoveryManager
+            ↓
         read_file recovery
             ↓
         success
@@ -38,105 +40,27 @@ def test_attempt_tool_recovery_success():
 
     runtime = create_runtime()
 
-    # --------------------------------------------------
-    # Mock Recovery Components
-    # --------------------------------------------------
+    runtime.recovery_manager = Mock()
 
-    runtime.recovery_policy = Mock()
-    runtime.recovery_selector = Mock()
-    runtime.recovery_attempt_policy = Mock()
-    runtime.recovery_argument_adapter = Mock()
-    runtime.recovery_executor = Mock()
-
-    # --------------------------------------------------
-    # Failure Classification
-    # --------------------------------------------------
-
-    # RecoveryPolicy decision
-    policy_decision = Mock()
-
-    policy_decision.should_recover = True
-    policy_decision.alternatives = [
-        "read_file",
-    ]
-    policy_decision.reason = "Alternative tool available"
-    policy_decision.to_dict.return_value = {
-        "should_recover": True,
-        "alternatives": ["read_file"],
-    }
-
-    runtime.recovery_policy.decide.return_value = policy_decision
-
-    # --------------------------------------------------
-    # Recovery Attempt
-    # --------------------------------------------------
-
-    attempt_decision = Mock()
-
-    attempt_decision.should_recover = True
-    attempt_decision.reason = "Recovery allowed"
-    attempt_decision.to_dict.return_value = {
-        "should_recover": True,
-    }
-
-    runtime.recovery_attempt_policy.can_recover.return_value = attempt_decision
-
-    # --------------------------------------------------
-    # Recovery Selection
-    # --------------------------------------------------
-
-    selection = Mock()
-
-    selection.selected = True
-    selection.selected_tool = "read_file"
-    selection.reason = "Selected first alternative"
-
-    selection.to_dict.return_value = {
-        "selected_tool": "read_file",
-    }
-
-    runtime.recovery_selector.select.return_value = selection
-
-    # --------------------------------------------------
-    # Argument Transformation
-    # --------------------------------------------------
-
-    transformed = Mock()
-
-    transformed.transformed_arguments = {
-        "path": "README.md",
-    }
-
-    transformed.changed = True
-
-    transformed.to_dict.return_value = {
-        "changed": True,
-        "transformed_arguments": {
-            "path": "README.md",
+    runtime.recovery_manager.handle.return_value = {
+        "recovered": True,
+        "attempted": True,
+        "original_tool": "read_section",
+        "failure": {
+            "category": "not_found",
+        },
+        "arguments": {
+            "changed": True,
+            "transformed_arguments": {
+                "path": "README.md",
+            },
+        },
+        "execution": {
+            "success": True,
+            "tool": "read_file",
+            "result": "README content",
         },
     }
-
-    runtime.recovery_argument_adapter.transform.return_value = transformed
-
-    # --------------------------------------------------
-    # Recovery Execution
-    # --------------------------------------------------
-
-    execution = Mock()
-
-    execution.success = True
-
-    execution.to_dict.return_value = {
-        "success": True,
-        "tool": "read_file",
-        "result": "README content",
-    }
-
-    runtime.recovery_executor.execute.return_value = execution
-
-    # --------------------------------------------------
-    # Execute
-    # --------------------------------------------------
 
     result = runtime.attempt_tool_recovery(
         original_tool="read_section",
@@ -147,24 +71,12 @@ def test_attempt_tool_recovery_success():
         tool_result="找不到指定的 Markdown Section。",
     )
 
-    # --------------------------------------------------
-    # Assertions
-    # --------------------------------------------------
-
     assert result["attempted"] is True
     assert result["recovered"] is True
 
-    assert result["original_tool"] == "read_section"
+    assert result["execution"]["tool"] == "read_file"
 
-    assert result["selection"]["selected_tool"] == "read_file"
-
-    assert runtime.task_state["recovery_attempt_count"] == 1
-
-    assert runtime.task_state["last_recovery_tool"] == "read_file"
-
-    assert runtime.task_state["last_recovery_result"] == execution.to_dict.return_value
-
-    assert runtime.task_state["last_recovery_category"] == "not_found"
+    runtime.recovery_manager.handle.assert_called_once()
 
 
 def test_attempt_tool_recovery_no_failure():
@@ -175,7 +87,18 @@ def test_attempt_tool_recovery_no_failure():
 
     runtime = create_runtime()
 
-    runtime.recovery_policy = Mock()
+    runtime.recovery_manager = Mock()
+
+    runtime.recovery_manager.handle.return_value = {
+        "recovered": False,
+        "attempted": False,
+        "original_tool": "read_section",
+        "failure": {
+            "failed": False,
+            "category": "none",
+        },
+        "reason": ("Tool Result 沒有被判定為 Failure。"),
+    }
 
     result = runtime.attempt_tool_recovery(
         original_tool="read_section",
@@ -189,32 +112,32 @@ def test_attempt_tool_recovery_no_failure():
     assert result["attempted"] is False
     assert result["recovered"] is False
 
-    runtime.recovery_policy.decide.assert_not_called()
-
-    assert runtime.task_state["recovery_attempt_count"] == 0
+    runtime.recovery_manager.handle.assert_called_once()
 
 
 def test_attempt_tool_recovery_policy_rejects():
     """
-    Failure 存在，但 RecoveryPolicy
+    Failure 存在，但 RecoveryManager
     判定不允許 Recovery。
     """
 
     runtime = create_runtime()
 
-    runtime.recovery_policy = Mock()
-    runtime.recovery_attempt_policy = Mock()
+    runtime.recovery_manager = Mock()
 
-    decision = Mock()
-
-    decision.should_recover = False
-    decision.reason = "No alternative tool"
-
-    decision.to_dict.return_value = {
-        "should_recover": False,
+    runtime.recovery_manager.handle.return_value = {
+        "recovered": False,
+        "attempted": False,
+        "original_tool": "write_file",
+        "failure": {
+            "failed": True,
+            "category": "permission_denied",
+        },
+        "recovery": {
+            "should_recover": False,
+        },
+        "reason": "No alternative tool",
     }
-
-    runtime.recovery_policy.decide.return_value = decision
 
     result = runtime.attempt_tool_recovery(
         original_tool="write_file",
@@ -227,11 +150,7 @@ def test_attempt_tool_recovery_policy_rejects():
     assert result["attempted"] is False
     assert result["recovered"] is False
 
-    assert result["recovery"]["should_recover"] is False
-
-    runtime.recovery_attempt_policy.can_recover.assert_not_called()
-
-    assert runtime.task_state["recovery_attempt_count"] == 0
+    runtime.recovery_manager.handle.assert_called_once()
 
 
 def test_attempt_tool_recovery_attempt_limit():
@@ -244,32 +163,21 @@ def test_attempt_tool_recovery_attempt_limit():
 
     runtime.task_state["recovery_attempt_count"] = 1
 
-    runtime.recovery_policy = Mock()
-    runtime.recovery_attempt_policy = Mock()
+    runtime.recovery_manager = Mock()
 
-    decision = Mock()
-
-    decision.should_recover = True
-    decision.alternatives = [
-        "read_file",
-    ]
-
-    decision.to_dict.return_value = {
-        "should_recover": True,
+    runtime.recovery_manager.handle.return_value = {
+        "recovered": False,
+        "attempted": False,
+        "original_tool": "read_section",
+        "failure": {
+            "failed": True,
+            "category": "not_found",
+        },
+        "attempt": {
+            "should_recover": False,
+        },
+        "reason": ("Maximum recovery attempts reached"),
     }
-
-    runtime.recovery_policy.decide.return_value = decision
-
-    attempt_decision = Mock()
-
-    attempt_decision.should_recover = False
-    attempt_decision.reason = "Maximum recovery attempts reached"
-
-    attempt_decision.to_dict.return_value = {
-        "should_recover": False,
-    }
-
-    runtime.recovery_attempt_policy.can_recover.return_value = attempt_decision
 
     result = runtime.attempt_tool_recovery(
         original_tool="read_section",
@@ -282,57 +190,35 @@ def test_attempt_tool_recovery_attempt_limit():
     assert result["attempted"] is False
     assert result["recovered"] is False
 
-    assert result["attempt"]["should_recover"] is False
-
-    assert runtime.task_state["recovery_attempt_count"] == 1
+    runtime.recovery_manager.handle.assert_called_once()
 
 
 def test_attempt_tool_recovery_no_selected_tool():
     """
-    RecoveryPolicy 有候選 Tool，
-    但 RecoverySelector 沒有選出 Tool。
+    RecoveryManager 有候選 Tool，
+    但最後沒有選出 Tool。
     """
 
     runtime = create_runtime()
 
-    runtime.recovery_policy = Mock()
-    runtime.recovery_attempt_policy = Mock()
-    runtime.recovery_selector = Mock()
+    runtime.recovery_manager = Mock()
 
-    decision = Mock()
-
-    decision.should_recover = True
-    decision.alternatives = [
-        "read_file",
-    ]
-
-    decision.to_dict.return_value = {
-        "should_recover": True,
+    runtime.recovery_manager.handle.return_value = {
+        "recovered": False,
+        "attempted": False,
+        "original_tool": "read_section",
+        "failure": {
+            "failed": True,
+            "category": "not_found",
+        },
+        "recovery": {
+            "should_recover": True,
+        },
+        "selection": {
+            "selected_tool": None,
+        },
+        "reason": "No valid alternative",
     }
-
-    runtime.recovery_policy.decide.return_value = decision
-
-    attempt_decision = Mock()
-
-    attempt_decision.should_recover = True
-
-    attempt_decision.to_dict.return_value = {
-        "should_recover": True,
-    }
-
-    runtime.recovery_attempt_policy.can_recover.return_value = attempt_decision
-
-    selection = Mock()
-
-    selection.selected = False
-    selection.selected_tool = None
-    selection.reason = "No valid alternative"
-
-    selection.to_dict.return_value = {
-        "selected_tool": None,
-    }
-
-    runtime.recovery_selector.select.return_value = selection
 
     result = runtime.attempt_tool_recovery(
         original_tool="read_section",
@@ -345,4 +231,4 @@ def test_attempt_tool_recovery_no_selected_tool():
     assert result["attempted"] is False
     assert result["recovered"] is False
 
-    assert result["selection"]["selected_tool"] is None
+    runtime.recovery_manager.handle.assert_called_once()

@@ -63,28 +63,8 @@ from agent.state import (
     update_task_state,
 )
 from agent.tool_runner import ToolRunner
-from agent.failure_classifier import (
-    classify_failure,
-)
-
-from agent.recovery_policy import (
-    RecoveryPolicy,
-)
-
-from agent.recovery_selector import (
-    RecoverySelector,
-)
-
-from agent.recovery_executor import (
-    RecoveryExecutor,
-)
-
-from agent.recovery_attempt import (
-    RecoveryAttemptPolicy,
-)
-
-from agent.recovery_arguments import (
-    RecoveryArgumentAdapter,
+from agent.recovery_manager import (
+    RecoveryManager,
 )
 
 # ============================================================
@@ -183,17 +163,9 @@ class AgentRuntime:
         # Recovery Components
         # ----------------------------------------------------
 
-        self.recovery_policy = RecoveryPolicy()
-
-        self.recovery_selector = RecoverySelector()
-
-        self.recovery_executor = RecoveryExecutor(
+        self.recovery_manager = RecoveryManager(
             self.tool_runner,
         )
-
-        self.recovery_attempt_policy = RecoveryAttemptPolicy()
-
-        self.recovery_argument_adapter = RecoveryArgumentAdapter()
         # ----------------------------------------------------
         # LLM Messages
         # ----------------------------------------------------
@@ -878,194 +850,54 @@ class AgentRuntime:
         arguments,
         tool_result,
     ):
-        """
-        嘗試針對 Tool Failure 執行 Alternative Tool Recovery。
-
-        Runtime 只負責 orchestration：
-
-            Failure Classification
-                    ↓
-            Recovery Policy
-                    ↓
-            Recovery Selection
-                    ↓
-            Recovery Attempt Control
-                    ↓
-            Argument Transformation
-                    ↓
-            Recovery Execution
-
-        實際 Tool 執行仍然交給 ToolRunner。
-        """
-
-        # ----------------------------------------------------
-        # 1. Failure Classification
-        # ----------------------------------------------------
-
-        classification = classify_failure(
-            tool_result,
-        )
-
-        if SHOW_AGENT_TRACE:
-
-            print()
-
-            print(
-                "🧭 Runtime："
-                "Failure Classification"
-            )
-
-            print(
-                "   Failed："
-                f"{classification.failed}"
-            )
-
-            print(
-                "   Category："
-                f"{classification.category.value}"
-            )
-
-            print(
-                "   Retryable："
-                f"{classification.retryable}"
-            )
-
-        if not classification.failed:
-
-            return {
-                "recovered": False,
-                "attempted": False,
-                "original_tool": original_tool,
-                "failure": classification.to_dict(),
-                "reason": "Tool Result 沒有被判定為 Failure。",
-            }
-
-        failure_category = classification.category
-
-        self.task_state["last_recovery_category"] = failure_category.value
-
-        # ----------------------------------------------------
-        # 2. Recovery Policy
-        # ----------------------------------------------------
-
-        decision = self.recovery_policy.decide(
-            original_tool,
-            failure_category,
-        )
-
-        if not decision.should_recover:
-
-            return {
-                "recovered": False,
-                "attempted": False,
-                "original_tool": original_tool,
-                "failure": classification.to_dict(),
-                "recovery": decision.to_dict(),
-                "reason": decision.reason,
-            }
-
-        # ----------------------------------------------------
-        # 3. Recovery Attempt Limit
-        # ----------------------------------------------------
-
         attempt_count = self.task_state.get(
             "recovery_attempt_count",
             0,
         )
 
-        attempt_decision = self.recovery_attempt_policy.can_recover(
-            attempt_count,
+        recovery_result = self.recovery_manager.handle(
+            original_tool=original_tool,
+            arguments=arguments,
+            tool_result=tool_result,
+            attempt_count=attempt_count,
         )
 
-        if not attempt_decision.should_recover:
+        # ========================================================
+        # Runtime State
+        # ========================================================
 
-            return {
-                "recovered": False,
-                "attempted": False,
-                "original_tool": original_tool,
-                "failure": classification.to_dict(),
-                "recovery": decision.to_dict(),
-                "attempt": attempt_decision.to_dict(),
-                "reason": attempt_decision.reason,
-            }
-
-        # ----------------------------------------------------
-        # 4. Select Alternative Tool
-        # ----------------------------------------------------
-
-        selection = self.recovery_selector.select(
-            decision.alternatives,
+        failure = recovery_result.get(
+            "failure",
+            {},
         )
 
-        if not selection.selected:
+        failure_category = failure.get("category")
 
-            return {
-                "recovered": False,
-                "attempted": False,
-                "original_tool": original_tool,
-                "failure": classification.to_dict(),
-                "recovery": decision.to_dict(),
-                "selection": selection.to_dict(),
-                "reason": selection.reason,
-            }
+        self.task_state["last_recovery_category"] = failure_category
 
-        alternative_tool = selection.selected_tool
+        if not recovery_result.get("attempted"):
+            return recovery_result
 
-        # ----------------------------------------------------
-        # 5. Transform Arguments
-        # ----------------------------------------------------
-
-        transformed = self.recovery_argument_adapter.transform(
-            original_tool,
-            alternative_tool,
-            arguments,
-        )
-
-        # ----------------------------------------------------
-        # 5.5 Validate Transformed Arguments
-        # ----------------------------------------------------
-
-        if not isinstance(
-            transformed.transformed_arguments,
-            dict,
-        ):
-
-            return {
-                "recovered": False,
-                "attempted": False,
-                "original_tool": original_tool,
-                "failure": classification.to_dict(),
-                "recovery": decision.to_dict(),
-                "selection": selection.to_dict(),
-                "arguments": transformed.to_dict(),
-                "reason": (
-                    "Recovery Arguments Transformation "
-                    "產生無效的 arguments。"
-                ),
-            }
-
-        # ----------------------------------------------------
-        # 6. Register Recovery Attempt
-        # ----------------------------------------------------
+        # ========================================================
+        # Recovery Attempt State
+        # ========================================================
 
         self.task_state["recovery_attempt_count"] = attempt_count + 1
 
-        self.task_state["last_recovery_tool"] = alternative_tool
-
-        # ----------------------------------------------------
-        # 7. Execute Alternative Tool
-        # ----------------------------------------------------
-
-        execution = self.recovery_executor.execute(
-            alternative_tool,
-            transformed.transformed_arguments,
+        execution = recovery_result.get(
+            "execution",
+            {},
         )
 
-        self.task_state["last_recovery_result"] = execution.to_dict()
+        recovery_tool = execution.get("tool")
 
-        # ----------------------------------------------------
-        # 8. Runtime Trace
-        # ----------------------------------------------------
+        self.task_state["last_recovery_tool"] = recovery_tool
+
+        self.task_state["last_recovery_result"] = execution
+
+        # ========================================================
+        # Trace
+        # ========================================================
 
         if SHOW_AGENT_TRACE:
 
@@ -1074,24 +906,20 @@ class AgentRuntime:
 
             print("   Original Tool：" f"{original_tool}")
 
-            print("   Failure Category：" f"{failure_category.value}")
+            print("   Failure Category：" f"{failure_category}")
 
-            print("   Alternative Tool：" f"{alternative_tool}")
+            print("   Alternative Tool：" f"{recovery_tool}")
 
-            print("   Arguments Changed：" f"{transformed.changed}")
+            arguments_result = recovery_result.get(
+                "arguments",
+                {},
+            )
 
-            print("   Recovery Result：" f"{execution.success}")
+            print("   Arguments Changed：" f"{arguments_result.get('changed')}")
 
-        return {
-            "recovered": execution.success,
-            "attempted": True,
-            "original_tool": original_tool,
-            "failure": classification.to_dict(),
-            "recovery": decision.to_dict(),
-            "selection": selection.to_dict(),
-            "arguments": transformed.to_dict(),
-            "execution": execution.to_dict(),
-        }
+            print("   Recovery Result：" f"{recovery_result.get('recovered')}")
+
+        return recovery_result
 
     # ========================================================
     # Tool Status
