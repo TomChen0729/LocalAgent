@@ -406,7 +406,12 @@ tools = [
                     "timeout": {
                         "type": "integer",
                         "description": (
-                            "Maximum execution time in seconds. " "Default is 60."
+                            "Maximum execution time in seconds. "
+                            "Default: 300. Range: 1–600. "
+                            "Use 300–600 for slow operations: "
+                            "pip install, npm install, docker pull, cargo build. "
+                            "Use 60–120 for fast operations: "
+                            "pytest, ruff, mypy, python script."
                         ),
                         "minimum": 1,
                         "maximum": 600,

@@ -89,7 +89,7 @@ class CommandExecutor:
         "docker-compose",
     }
 
-    DEFAULT_TIMEOUT = 60
+    DEFAULT_TIMEOUT = 300   # pip/npm/docker 類操作預設 5 分鐘
 
     MAX_TIMEOUT = 600
 

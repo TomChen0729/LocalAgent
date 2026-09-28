@@ -2,11 +2,15 @@ from tools.project_context import get_project_path
 
 from agent.command_executor import CommandExecutor
 
+# pip install / npm install / docker pull 在慢速網路上可能需要數分鐘
+# 預設給 5 分鐘，避免因效能差異導致任務失敗
+DEFAULT_TIMEOUT = 300
+
 
 def execute_command(
     program: str,
     arguments=None,
-    timeout: int = 60,
+    timeout: int = DEFAULT_TIMEOUT,
 ):
     """
     執行受控開發工具命令。
