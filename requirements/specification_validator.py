@@ -410,7 +410,9 @@ class SpecificationValidator:
         # TaskSpecification 時保持 backward compatible。
         # ----------------------------------------------------
 
-        known_fields = required_fields
+        known_fields = required_fields | {
+            "action_checklist",  # Phase 10: Action Checklist 功能
+        }
 
         for field_name in specification:
 

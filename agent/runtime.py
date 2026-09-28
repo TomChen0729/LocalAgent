@@ -687,6 +687,8 @@ class AgentRuntime:
         self.task_state["parser_status"] = "passed"
         self.task_state["parser_error"] = None
         self.task_state["task_specification"] = specification.to_dict()
+        # 儲存 ActionItem 物件本身，讓 runtime 可以直接更新 done 狀態
+        self.task_state["action_checklist"] = specification.action_checklist
 
         return specification
 
@@ -804,6 +806,15 @@ class AgentRuntime:
                 ensure_ascii=False,
             )
         )
+
+        # Action Checklist 顯示
+        checklist = specification.action_checklist
+        if checklist:
+            print(f"   Action Checklist（{len(checklist)} 項）：")
+            for item in checklist:
+                status = "✅" if item.done else "⬜"
+                target_str = f" → {item.target}" if item.target else ""
+                print(f"      {status} {item.description}{target_str}")
 
     # ========================================================
     # Phase 8.6
@@ -3246,6 +3257,29 @@ Agent Final Answer：
                         if file_path:
                             files_written_this_batch.add(file_path)
 
+                    # =========================================
+                    # Action Checklist 追蹤
+                    # =========================================
+
+                    checklist: list = self.task_state.get("action_checklist", [])
+                    if checklist:
+                        # 判斷此次 tool call 是否成功
+                        _success = (
+                            isinstance(tool_result, dict)
+                            and tool_result.get("success", False)
+                        ) or (
+                            not isinstance(tool_result, dict)
+                            and tool_result is not None
+                        )
+                        if _success:
+                            for item in checklist:
+                                if not item.done and item.matches_tool_call(tool_name, arguments or {}):
+                                    item.done = True
+                                    if SHOW_AGENT_TRACE:
+                                        target_str = f" → {item.target}" if item.target else ""
+                                        print(f"   ✅ Checklist：{item.description}{target_str}")
+                                    break
+
                     # =================================================
                     # Phase 9.3
                     # Tool Failure Recovery
@@ -3607,7 +3641,51 @@ Agent Final Answer：
 
             # =================================================
             # Agent 沒有 Tool Call
-            # → Final Answer Candidate
+            # → Action Checklist Gate（程式碼強制）
+            # =================================================
+            #
+            # 在允許 Final Answer 之前，先確認 action_checklist 都已完成。
+            # 這是程式碼層面的強制機制，不依賴模型記憶。
+            # ─────────────────────────────────────────────────
+
+            checklist: list = self.task_state.get("action_checklist", [])
+            pending_actions = [item for item in checklist if not item.done]
+
+            if pending_actions:
+
+                # 建立待辦清單訊息注入 context，強制 Agent 繼續
+                pending_lines = "\n".join(
+                    f"  ⬜ {item.description}"
+                    + (f" → {item.target}" if item.target else "")
+                    for item in pending_actions
+                )
+
+                gate_message = (
+                    "[Action Checklist Gate]\n"
+                    "以下操作尚未完成，必須執行完畢才能結束任務：\n"
+                    f"{pending_lines}\n\n"
+                    "請繼續執行上述操作。"
+                )
+
+                if SHOW_AGENT_TRACE:
+                    print()
+                    print("⏸️  Runtime：Action Checklist Gate — 尚有未完成操作")
+                    for item in pending_actions:
+                        target_str = f" → {item.target}" if item.target else ""
+                        print(f"      ⬜ {item.description}{target_str}")
+
+                self.messages.append(response_message)
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": gate_message + " /no_think 請使用繁體中文回答。",
+                    }
+                )
+
+                continue   # 返回 Agent Loop 繼續執行
+
+            # =================================================
+            # Action Checklist 全部完成 → Final Answer Candidate
             # =================================================
 
             final_answer = self.clean_final_answer(response_message.content)

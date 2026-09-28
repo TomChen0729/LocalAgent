@@ -194,6 +194,12 @@ class TaskSpecification:
 
     output_constraints: OutputConstraints = field(default_factory=OutputConstraints)
 
+    # Action Checklist：必須被「執行」的操作，由 Runtime 程式碼追蹤
+    # 與 state_requirements（驗證檔案系統狀態）互補：
+    #   state_requirements = "檔案系統應該長這樣"
+    #   action_checklist   = "這些操作必須被執行過"
+    action_checklist: list["ActionItem"] = field(default_factory=list)
+
     def validate(self) -> list[str]:
         """
         驗證整份 Task Specification。
@@ -246,6 +252,21 @@ class TaskSpecification:
             for requirement in self.state_requirements
         ]
 
+    def get_pending_actions(self) -> list["ActionItem"]:
+        """回傳尚未完成的 action items。"""
+        return [item for item in self.action_checklist if not item.done]
+
+    def mark_action_done(self, action_type: str) -> bool:
+        """
+        將第一個符合 action_type 且尚未完成的 item 標記為已完成。
+        回傳是否有任何 item 被標記。
+        """
+        for item in self.action_checklist:
+            if item.action_type == action_type and not item.done:
+                item.done = True
+                return True
+        return False
+
     def to_dict(self) -> dict[str, Any]:
         """
         將 TaskSpecification 轉成普通 dict。
@@ -283,4 +304,94 @@ class TaskSpecification:
                 "max_words": (self.output_constraints.max_words),
                 "language": (self.output_constraints.language),
             },
+            "action_checklist": [
+                {
+                    "action_type": item.action_type,
+                    "description": item.description,
+                    "done": item.done,
+                }
+                for item in self.action_checklist
+            ],
         }
+
+
+# ============================================================
+# ActionItem — 代表「必須被執行的操作」
+#
+# 與 StateRequirement 的差異：
+#   StateRequirement = 驗證「檔案系統狀態」（是否存在、是否包含）
+#   ActionItem       = 追蹤「操作是否執行過」（git commit、git push 等）
+#
+# action_type 到 tool 的對應：
+#   "git_commit"     → tool: git_commit
+#   "git_push"       → tool: git_run(subcommand=push)
+#   "git_add"        → tool: git_run(subcommand=add)
+#   "edit_file"      → tool: edit_file（target 為 path）
+#   "write_file"     → tool: write_file（target 為 path）
+#   "execute_command"→ tool: execute_command（target 為 program）
+# ============================================================
+
+SUPPORTED_ACTION_TYPES = {
+    "git_commit",
+    "git_push",
+    "git_add",
+    "edit_file",
+    "write_file",
+    "execute_command",
+    "delete_file",
+}
+
+
+@dataclass
+class ActionItem:
+    """
+    代表一個必須被執行的操作。
+    Runtime 在每次 Tool Call 成功後更新 done 狀態。
+    """
+
+    action_type: str       # SUPPORTED_ACTION_TYPES 之一
+    description: str       # 人類可讀的描述，顯示給使用者
+    target: str | None = None   # 可選：檔案路徑或程式名稱，用於更精確的比對
+    done: bool = False
+
+    def validate(self) -> list[str]:
+        errors = []
+        if self.action_type not in SUPPORTED_ACTION_TYPES:
+            errors.append(f"不支援的 action_type：{self.action_type}")
+        if not isinstance(self.description, str) or not self.description.strip():
+            errors.append("ActionItem description 必須是非空字串。")
+        return errors
+
+    def matches_tool_call(self, tool_name: str, arguments: dict) -> bool:
+        """
+        判斷一個 Tool Call 是否可以完成這個 ActionItem。
+        """
+        if self.action_type == "git_commit" and tool_name == "git_commit":
+            return True
+        if self.action_type == "git_push" and tool_name == "git_run":
+            subcommand = str(arguments.get("subcommand", "")).lower()
+            return subcommand == "push"
+        if self.action_type == "git_add" and tool_name == "git_run":
+            subcommand = str(arguments.get("subcommand", "")).lower()
+            return subcommand == "add"
+        if self.action_type == "edit_file" and tool_name == "edit_file":
+            if self.target:
+                path = str(arguments.get("path", ""))
+                return self.target in path or path.endswith(self.target)
+            return True
+        if self.action_type == "write_file" and tool_name == "write_file":
+            if self.target:
+                path = str(arguments.get("path", ""))
+                return self.target in path or path.endswith(self.target)
+            return True
+        if self.action_type == "execute_command" and tool_name == "execute_command":
+            if self.target:
+                program = str(arguments.get("program", "")).lower()
+                return program == self.target.lower()
+            return True
+        if self.action_type == "delete_file" and tool_name == "delete_file":
+            if self.target:
+                path = str(arguments.get("path", ""))
+                return self.target in path or path.endswith(self.target)
+            return True
+        return False

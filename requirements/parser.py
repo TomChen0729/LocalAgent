@@ -5,6 +5,7 @@ from typing import Any
 from ollama import chat
 
 from requirements.specification import (
+    ActionItem,
     Objective,
     OutputConstraints,
     StateRequirement,
@@ -341,6 +342,43 @@ contains 的 text 必須是：
 例外：
 使用者明確說「確保檔案包含 XXX 這段文字」→ 才用 contains
 
+==================================================
+action_checklist（新）
+==================================================
+
+action_checklist 是一個操作清單，列出使用者要求「必須執行」的操作。
+這些操作不是靠「檔案系統狀態」驗證，而是靠「確認操作被執行過」。
+
+支援的 action_type（只能用這些值）：
+- "git_commit"      → 使用者要求 git commit
+- "git_push"        → 使用者要求 push 到 GitHub / remote
+- "git_add"         → 使用者要求 git add（通常和 commit 一起出現）
+- "edit_file"       → 使用者要求修改某個特定檔案（target 填檔案名稱）
+- "write_file"      → 使用者要求建立某個特定檔案（target 填檔案名稱）
+- "execute_command" → 使用者要求執行某個命令（target 填程式名稱，如 "pip"）
+- "delete_file"     → 使用者要求刪除某個檔案
+
+規則：
+1. 只在使用者「明確要求某個操作」時才加入 action_checklist
+2. 純閱讀 / 查詢任務（解釋、列出、說明）不需要 action_checklist
+3. 每個 item 必須有 description（使用者語言的說明）
+4. target 是可選的，用於更精確地追蹤（例如 edit_file 加 target: "requirements.txt"）
+
+範例：
+
+使用者說「幫我升級套件版本並 push 到 GitHub」→
+
+"action_checklist": [
+  {"action_type": "execute_command", "description": "pip install --upgrade 升級套件", "target": "pip"},
+  {"action_type": "edit_file", "description": "更新 requirements.txt 版本號", "target": "requirements.txt"},
+  {"action_type": "git_add", "description": "git add 變更"},
+  {"action_type": "git_commit", "description": "commit 更新"},
+  {"action_type": "git_push", "description": "push 到 GitHub"}
+]
+
+使用者說「解釋這個專案的架構」→
+"action_checklist": []
+
 現在只輸出 JSON。
 """
 
@@ -637,9 +675,38 @@ class RequirementParser:
             ),
         )
 
+        # --- ActionChecklist（容錯：LLM 可能不輸出此欄位）---
+        from requirements.specification import SUPPORTED_ACTION_TYPES
+
+        checklist_data = data.get("action_checklist", [])
+        action_checklist = []
+
+        if isinstance(checklist_data, list):
+            for idx, item in enumerate(checklist_data):
+                if not isinstance(item, dict):
+                    continue
+                action_type = item.get("action_type", "")
+                description = item.get("description", "")
+                target = item.get("target")
+
+                # 跳過不支援的 action_type（容錯）
+                if action_type not in SUPPORTED_ACTION_TYPES:
+                    continue
+                if not isinstance(description, str) or not description.strip():
+                    description = action_type  # fallback 描述
+
+                action_checklist.append(
+                    ActionItem(
+                        action_type=action_type,
+                        description=description,
+                        target=target if isinstance(target, str) else None,
+                    )
+                )
+
         return TaskSpecification(
             objective=objective,
             tool_constraints=tool_constraints,
             state_requirements=state_requirements,
             output_constraints=output_constraints,
+            action_checklist=action_checklist,
         )
