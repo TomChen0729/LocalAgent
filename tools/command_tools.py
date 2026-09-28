@@ -1,28 +1,6 @@
-from pathlib import Path
+from tools.project_context import get_project_path
 
 from agent.command_executor import CommandExecutor
-
-
-def get_project_path():
-    """
-    取得目前 LocalAgent 的專案根目錄。
-
-    command_tools.py 位於：
-
-        LocalAgent/
-        └── tools/
-            └── command_tools.py
-
-    因此：
-
-        Path(__file__).resolve().parent
-            → LocalAgent/tools
-
-        parent.parent
-            → LocalAgent
-    """
-
-    return Path(__file__).resolve().parent.parent
 
 
 def execute_command(
@@ -33,34 +11,28 @@ def execute_command(
     """
     執行受控開發工具命令。
 
+    工作目錄（cwd）會自動跟隨目前的 project_context：
+    - 若使用 --workdir 指定了專案目錄，命令在那個目錄執行。
+    - 否則預設在 LocalAgent 自身目錄執行。
+
     Parameters
     ----------
     program:
-        要執行的程式。
+        要執行的程式名稱（必須在白名單內）。
 
-        例如：
-
-            python
-            pytest
-            php
-            composer
-            npm
-            node
-            docker
+        例如：python、pytest、pip、npm、node
 
     arguments:
-        命令參數。
+        命令參數列表。
 
         例如：
 
             ["--version"]
-
-            ["-q"]
-
             ["-m", "pytest", "-q"]
+            ["install", "-r", "requirements.txt"]
 
     timeout:
-        最大執行秒數。
+        最大執行秒數（預設 60 秒）。
     """
 
     executor = CommandExecutor(project_path=get_project_path())
