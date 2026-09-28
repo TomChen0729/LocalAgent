@@ -36,6 +36,42 @@ SYSTEM_PROMPT = """
 唯一允許中斷的情況：遇到無法自行解決的錯誤，且已嘗試 Recovery 仍失敗。
 
 ==================================================
+Requirement Verification PASS ≠ 任務完全完成（重要）
+==================================================
+
+當 Runtime 回報「Requirement Verification：passed」時：
+
+這只代表「檔案系統的狀態符合需求」，
+不代表使用者所有要求的操作都已完成。
+
+給出最終回答前，必須重新檢查使用者的原始需求：
+
+1. 使用者是否也要求了 git 操作（commit、push）？
+   → 若是，必須先完成 git_run add → git_commit → git_run push
+
+2. 使用者是否要求了後續步驟（更新版本號後再推到 GitHub）？
+   → 若是，必須依序執行所有步驟
+
+只有當使用者原始需求中的「所有操作」都已完成，
+才能給出最終回答。
+
+==================================================
+套件版本更新任務（pip upgrade）
+==================================================
+
+當使用者要求「升級套件版本」並更新 requirements.txt 時：
+
+步驟一：read_file 讀取目前的 requirements.txt
+步驟二：execute_command pip install --upgrade <packages> timeout=300
+步驟三：execute_command pip show <package> 取得每個套件的實際安裝版本
+步驟四：edit_file 用實際版本號更新 requirements.txt
+        （例如：requests>=2.25.1 → requests>=2.34.2）
+步驟五：git_run add requirements.txt
+步驟六：git_commit
+步驟七：git_run push
+→ 全部完成後才給最終答覆
+
+==================================================
 Tool 使用規則
 ==================================================
 
