@@ -28,6 +28,7 @@ from pathlib import Path
 from tools.command_tools import execute_command
 from tools.project_context import (
     get_project_path,
+    set_project_path,
     push_project_path,
     reset_project_path,
 )
@@ -162,7 +163,7 @@ class AgentRuntime:
         if project_path is None:
             self.project_path = get_project_path()
         else:
-            self.project_path = Path(project_path).resolve()
+            self.project_path = set_project_path(project_path)
 
         # ----------------------------------------------------
         # Phase 8.2
@@ -249,13 +250,16 @@ class AgentRuntime:
     @staticmethod
     def _inject_no_think(messages: list) -> list:
         """
-        在最後一條 role=user 的 message 尾部注入 /no_think。
+        在最後一條 role=user 的 message 尾部注入：
+        1. /no_think  → 停用 Qwen3 的 thinking mode
+        2. 繁體中文強制指令 → 避免 Qwen3:8b 回覆成簡體
 
         Qwen3 的 /no_think token 必須在 user message 結尾
         才能可靠地停用思考模式。放在 system prompt 裡無效。
 
         回傳淺拷貝，不修改原始 messages。
         """
+        SUFFIX = " /no_think 請使用繁體中文回答。"
 
         patched = list(messages)
 
@@ -270,12 +274,12 @@ class AgentRuntime:
             if role == "user" and content:
                 if "/no_think" not in content:
                     if isinstance(msg, dict):
-                        patched[i] = {**msg, "content": content + " /no_think"}
+                        patched[i] = {**msg, "content": content + SUFFIX}
                     else:
                         # Ollama Message 物件 — 複製一份
                         import copy
                         new_msg = copy.copy(msg)
-                        new_msg.content = content + " /no_think"
+                        new_msg.content = content + SUFFIX
                         patched[i] = new_msg
                 break
 
@@ -685,6 +689,55 @@ class AgentRuntime:
         self.task_state["task_specification"] = specification.to_dict()
 
         return specification
+
+    @staticmethod
+    def _generate_session_name(
+        task_specification,
+        user_input: str,
+    ) -> str:
+        """
+        根據 TaskSpecification 的 objective 自動產生 Session 名稱。
+
+        不需要額外 LLM 呼叫，直接從已解析的結構格式化。
+        例如：
+            inspect + TaiwanStockScraper/ → 「探索 TaiwanStockScraper/」
+            create  + calculator.py       → 「建立 calculator.py」
+            debug   + main.py             → 「除錯 main.py」
+        """
+        ACTION_MAP = {
+            "create":   "建立",
+            "edit":     "修改",
+            "inspect":  "探索",
+            "explain":  "說明",
+            "debug":    "除錯",
+            "test":     "測試",
+            "refactor": "重構",
+            "delete":   "刪除",
+            "general":  "",
+        }
+
+        try:
+            obj = task_specification.objective
+            if obj:
+                action = ACTION_MAP.get(obj.type, obj.type)
+                target = (obj.target or "").strip()
+                focus = (obj.focus or "").strip()
+
+                if target and focus:
+                    name = f"{action} {target}（{focus}）" if action else f"{target}（{focus}）"
+                elif target:
+                    name = f"{action} {target}" if action else target
+                else:
+                    name = action or ""
+
+                if name.strip():
+                    return name.strip()[:60]
+        except Exception:
+            pass
+
+        # Fallback：截斷第一條 user message
+        text = user_input.strip().replace("\n", " ")
+        return (text[:40] + "…") if len(text) > 40 else text
 
     def show_task_specification(
         self,
@@ -2924,6 +2977,12 @@ Agent Final Answer：
         if task_specification is not None:
 
             self.show_task_specification(task_specification)
+
+            # 自動命名 Session（只在第一次 run，且尚未命名時）
+            if self.session_manager and not self.session_manager.get_name():
+                self.session_manager.set_name(
+                    self._generate_session_name(task_specification, user_input)
+                )
 
             # ====================================================
             # Phase 8.6

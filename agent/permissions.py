@@ -61,7 +61,12 @@ class PermissionManager:
         "execute_command": "execute",
     }
 
-    # git_run 的 push 類操作視為更高風險
+    # git_run 的 staging 類操作（中風險，視為 write）
+    GIT_STAGING_SUBCOMMANDS = {
+        "add", "rm", "reset", "restore", "mv",
+    }
+
+    # git_run 的 push 類操作（最高風險，視為 execute）
     GIT_PUSH_SUBCOMMANDS = {
         "push",
     }
@@ -101,9 +106,10 @@ class PermissionManager:
 
         對 git_run 會根據 subcommand 動態判斷：
 
-            read-only subcommand  → "read"   （自動允許）
-            push                  → "execute" （需要確認）
-            其他                  → "commit"  （需要確認）
+            read-only subcommand               → "read"    （自動允許）
+            staging subcommand (add/rm/reset)  → "write"   （需要確認）
+            push / force-push                  → "execute" （最高風險，需要確認）
+            其他 (commit/merge/rebase…)        → "commit"  （需要確認）
         """
 
         if tool_name == "git_run" and arguments:
@@ -111,6 +117,9 @@ class PermissionManager:
 
             if subcommand in GIT_READ_SUBCOMMANDS:
                 return "read"
+
+            if subcommand in self.GIT_STAGING_SUBCOMMANDS:
+                return "write"
 
             if subcommand in self.GIT_PUSH_SUBCOMMANDS:
                 return "execute"

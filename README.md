@@ -122,6 +122,34 @@ The agent will ask for your confirmation before writing files, executing command
 
 ---
 
+## 📁 Recommended: Use `--workdir`
+
+The cleanest way to use LocalAgent is to install it **once** in a fixed location and point it at any project with `--workdir`:
+
+```bash
+# Install LocalAgent somewhere permanent
+git clone https://github.com/<your-username>/LocalAgent.git ~/tools/LocalAgent
+
+# Then use it from anywhere — the agent works on YOUR project, not on LocalAgent itself
+python ~/tools/LocalAgent/main.py --workdir /path/to/my-project
+
+# Windows example
+python C:\tools\LocalAgent\main.py --workdir C:\projects\MyApp
+```
+
+The startup banner confirms which directory the agent is operating on:
+
+```
+Local Coding Agent
+📂 Working directory: C:\projects\MyApp
+📌 Session ID：a1b2c3d4
+🧪 Auto Test   ⚡ Streaming
+```
+
+This keeps LocalAgent completely separate from your projects — no mixing of tool code and project code.
+
+---
+
 ## 🖥️ CLI Reference
 
 ```
@@ -130,7 +158,8 @@ python main.py [OPTIONS]
 
 | Option | Description |
 |---|---|
-| *(no options)* | Start a new interactive session |
+| *(no options)* | Start a new interactive session (works on the current directory) |
+| `--workdir <PATH>` | **Point the agent at a specific project directory** |
 | `--resume <SESSION_ID>` | Resume a previous session by ID |
 | `--list-sessions` | List all saved sessions with timestamps |
 | `--no-auto-test` | Disable automatic `pytest` after code changes |

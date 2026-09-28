@@ -3,14 +3,26 @@ tools = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "列出指定目錄中的檔案與資料夾。",
+            "description": (
+                "列出指定目錄中的檔案與資料夾。"
+                "要探索不熟悉的專案結構時，使用 recursive=true 一次看到所有層級。"
+                "預設只列出第一層（recursive=false）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要列出的目錄路徑。",
-                    }
+                        "description": "要列出的目錄路徑。留空或使用 '.' 代表專案根目錄。",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": (
+                            "是否遞迴列出所有子目錄內容。"
+                            "探索未知專案結構時設為 true；"
+                            "只需要看某個資料夾的直接內容時設為 false（預設）。"
+                        ),
+                    },
                 },
                 "required": [],
             },

@@ -105,7 +105,19 @@ def file_exists(path):
     if resolved_path is None:
         return False
 
-    return resolved_path.exists()
+    if resolved_path.exists():
+        return True
+
+    # 沒有副檔名時，自動嘗試常見副檔名
+    # 解決 parser 把 "README" → file_exists: "README"
+    # 但實際建立 "README.md" 的情況
+    if not resolved_path.suffix:
+        for ext in (".md", ".txt", ".rst", ".html",
+                    ".json", ".yaml", ".yml", ".toml"):
+            if resolved_path.with_suffix(ext).exists():
+                return True
+
+    return False
 
 
 def read_file(path):

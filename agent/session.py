@@ -65,6 +65,9 @@ class SessionManager:
         else:
             self.session_id = uuid.uuid4().hex[:8]
 
+        # Session 名稱（記憶體中，下次 save() 時持久化到磁碟）
+        self._name: Optional[str] = None
+
     # ----------------------------------------------------------
     # Path
     # ----------------------------------------------------------
@@ -78,6 +81,30 @@ class SessionManager:
     def exists(self) -> bool:
         """Session 檔案是否存在。"""
         return self.session_file.exists()
+
+    # ----------------------------------------------------------
+    # Name
+    # ----------------------------------------------------------
+
+    def set_name(self, name: str) -> None:
+        """
+        設定 Session 名稱。
+
+        名稱只存在記憶體中，下次 save() 時才寫入磁碟。
+        """
+        self._name = name.strip()
+
+    def get_name(self) -> Optional[str]:
+        """
+        取得 Session 名稱。
+
+        優先回傳記憶體中的名稱；
+        若無，則從磁碟讀取。
+        """
+        if self._name:
+            return self._name
+        data = self._load_raw()
+        return (data or {}).get("name")
 
     # ----------------------------------------------------------
     # Save
@@ -111,6 +138,9 @@ class SessionManager:
         # 序列化 messages（Ollama Message 物件 → dict）
         serialized = self._serialize_messages(messages)
 
+        # 決定 name：優先用記憶體中的 _name，其次保留磁碟既有的 name
+        name = self._name or (existing or {}).get("name")
+
         data = {
             "session_id": self.session_id,
             "created_at": created_at,
@@ -119,6 +149,9 @@ class SessionManager:
             "messages": serialized,
             **(extra or {}),
         }
+
+        if name:
+            data["name"] = name
 
         tmp = self.session_file.with_suffix(".tmp")
 
@@ -195,6 +228,7 @@ class SessionManager:
 
         只載入最後 MAX_MESSAGES_ON_RESUME 條訊息，
         避免超出 LLM 的 context window。
+        同時從磁碟還原 name 到記憶體。
 
         Returns
         -------
@@ -203,6 +237,10 @@ class SessionManager:
         data = self._load_raw()
         if not data:
             return []
+
+        # 還原 name 到記憶體（若磁碟有記錄）
+        if data.get("name") and not self._name:
+            self._name = data["name"]
 
         messages = data.get("messages", [])
 
@@ -223,6 +261,8 @@ class SessionManager:
 
         return {
             "session_id": data.get("session_id"),
+            "name": data.get("name"),
+            "workdir": data.get("workdir"),   # 上次使用的工作目錄（絕對路徑）
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "message_count": data.get("message_count", 0),
@@ -243,6 +283,8 @@ class SessionManager:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 sessions.append({
                     "session_id": data.get("session_id", f.stem),
+                    "name": data.get("name", ""),
+                    "workdir": data.get("workdir", ""),
                     "created_at": data.get("created_at", "?"),
                     "updated_at": data.get("updated_at", "?"),
                     "message_count": data.get("message_count", 0),
