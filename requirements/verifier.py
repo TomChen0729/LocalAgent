@@ -39,21 +39,73 @@ def _resolve_project_path(path):
     return target_path
 
 
+def _is_glob_pattern(path: str) -> bool:
+    """判斷路徑是否為 glob pattern（含 * ? [ 字元）。"""
+    return any(c in path for c in ("*", "?", "["))
+
+
+def _glob_find_files(pattern: str) -> list:
+    """
+    在專案根目錄下找出符合 glob pattern 的所有檔案。
+
+    安全設計：
+    - 只在 project_path 內搜尋，不允許跳出
+    - 回傳空 list 表示沒有符合的檔案
+
+    Parameters
+    ----------
+    pattern : str
+        glob pattern，例如 **/*.py、**/requirements.txt
+
+    Returns
+    -------
+    list[Path] : 符合的路徑列表
+    """
+    project_path = Path(get_project_path()).resolve()
+
+    try:
+        matches = list(project_path.glob(pattern))
+    except Exception:
+        return []
+
+    # 確保所有結果都在 project_path 內（安全防護）
+    safe_matches = []
+    for m in matches:
+        try:
+            m.resolve().relative_to(project_path)
+            safe_matches.append(m)
+        except ValueError:
+            continue
+
+    return safe_matches
+
+
 def file_exists(path):
     """
     Requirement Verifier 專用的檔案存在檢查。
+
+    支援兩種模式：
+
+    1. 精確路徑：path = "src/main.py"
+       → 直接解析並確認檔案或資料夾是否存在
+
+    2. Glob 模式：path = "**/main.py" 或 "**/*.py"
+       → 在整個專案目錄下搜尋，找到任一符合的檔案即通過
 
     注意：
     這裡刻意使用 verifier 自己的 get_project_path()，
     讓測試可以透過 monkeypatch 替換專案根目錄。
     """
 
+    if _is_glob_pattern(path):
+        return bool(_glob_find_files(path))
+
     resolved_path = _resolve_project_path(path)
 
     if resolved_path is None:
         return False
 
-    return resolved_path.is_file()
+    return resolved_path.exists()
 
 
 def read_file(path):
@@ -126,15 +178,22 @@ def verify_requirement(requirement):
             "message": "Requirement 缺少有效的 path。",
         }
 
-    resolved_path = _resolve_project_path(path)
+    # --------------------------------------------------
+    # Glob Pattern：跳過嚴格路徑解析，直接走 glob 分支
+    # --------------------------------------------------
 
-    if resolved_path is None:
-        return {
-            "status": "failed",
-            "type": requirement_type,
-            "path": path,
-            "message": "Requirement 路徑超出專案範圍。",
-        }
+    is_glob = _is_glob_pattern(path)
+
+    if not is_glob:
+        resolved_path = _resolve_project_path(path)
+
+        if resolved_path is None:
+            return {
+                "status": "failed",
+                "type": requirement_type,
+                "path": path,
+                "message": "Requirement 路徑超出專案範圍。",
+            }
 
     # --------------------------------------------------
     # file_exists
@@ -177,6 +236,70 @@ def verify_requirement(requirement):
                 "path": path,
                 "message": ("contains / not_contains " "Requirement 缺少有效的 text。"),
             }
+
+        # --------------------------------------------------
+        # Glob 模式：搜尋所有符合的檔案
+        # --------------------------------------------------
+
+        if is_glob:
+            matches = _glob_find_files(path)
+
+            if not matches:
+                return {
+                    "status": "failed",
+                    "type": requirement_type,
+                    "path": path,
+                    "message": f"Glob 模式找不到符合的檔案：{path}",
+                }
+
+            # contains：任一個檔案包含 text 即通過
+            # not_contains：所有找到的檔案都不包含 text 才通過
+            found_in = None
+            for match in matches:
+                try:
+                    file_content = match.read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    if text in file_content:
+                        found_in = str(match)
+                        break
+                except Exception:
+                    continue
+
+            if requirement_type == "contains":
+                if found_in:
+                    return {
+                        "status": "passed",
+                        "type": "contains",
+                        "path": path,
+                        "message": f"找到包含 '{text}' 的檔案：{found_in}",
+                    }
+                return {
+                    "status": "failed",
+                    "type": "contains",
+                    "path": path,
+                    "message": f"Glob {path} 符合的所有檔案均不包含：{text}",
+                }
+
+            # not_contains
+            if found_in:
+                return {
+                    "status": "failed",
+                    "type": "not_contains",
+                    "path": path,
+                    "message": f"找到包含 '{text}' 的檔案（不應存在）：{found_in}",
+                }
+            return {
+                "status": "passed",
+                "type": "not_contains",
+                "path": path,
+                "message": f"Glob {path} 符合的所有檔案均不包含：{text}",
+            }
+
+        # --------------------------------------------------
+        # 精確路徑：原本邏輯
+        # --------------------------------------------------
 
         content = read_file(path)
 

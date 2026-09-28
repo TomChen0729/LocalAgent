@@ -36,6 +36,7 @@ from tools.git_tools import (
     git_diff,
     git_log,
     git_commit,
+    git_run,
 )
 
 from requirements.verifier import (
@@ -71,12 +72,14 @@ from agent.tool_runner import ToolRunner
 from agent.recovery_manager import (
     RecoveryManager,
 )
+from agent.test_runner import TestRunner
+from agent.session import SessionManager
 
 # ============================================================
 # Agent Runtime Configuration
 # ============================================================
 
-MAX_TOOL_CALLS = 20
+MAX_TOOL_CALLS = 50
 
 # 同一個 Tool + 完全相同 arguments
 # 連續出現幾次後視為重複
@@ -94,6 +97,18 @@ MAX_REQUIREMENT_FAILURES = 3
 # 當 Final Answer 持續不符合 Output Constraints，
 # 最多允許幾次 Recovery。
 MAX_OUTPUT_VERIFICATION_FAILURES = 3
+
+# Auto Test Loop
+#
+# 測試失敗後最多嘗試幾次自動修復。
+# 超過後停止 test loop，繼續正常 Agent 流程。
+MAX_AUTO_TEST_FIX_ATTEMPTS = 3
+
+# 空答案重試上限
+#
+# Qwen3 thinking mode 有時只產生 <think> 區塊，clean 後回傳空字串。
+# 最多允許重試幾次，超過後停止任務。
+MAX_EMPTY_ANSWER_RETRIES = 3
 
 # 需要在執行後進行驗證的 Tool
 VERIFICATION_REQUIRED_TOOLS = {
@@ -132,12 +147,23 @@ class AgentRuntime:
         self,
         model="qwen3:8b",
         project_path=None,
+        session_manager: SessionManager = None,
+        auto_test: bool = True,
+        stream: bool = False,
     ):
         self.model = model
+        self.auto_test = auto_test
+        self.stream = stream
+
+        # 上一次 _do_chat 是否有把 content 印到 terminal
+        # main.py 用這個判斷要不要重複印 final_answer
+        self._last_response_was_streamed = False
+
         if project_path is None:
             self.project_path = get_project_path()
         else:
             self.project_path = Path(project_path).resolve()
+
         # ----------------------------------------------------
         # Phase 8.2
         #
@@ -175,15 +201,35 @@ class AgentRuntime:
         self.recovery_manager = RecoveryManager(
             self.tool_runner,
         )
+
+        # ----------------------------------------------------
+        # Auto Test Runner
+        # ----------------------------------------------------
+
+        self.test_runner = TestRunner(self.project_path)
+        self._auto_test_fix_count = 0
+
+        # ----------------------------------------------------
+        # Session Manager
+        # ----------------------------------------------------
+
+        self.session_manager = session_manager
+
         # ----------------------------------------------------
         # LLM Messages
         # ----------------------------------------------------
-        self.messages = [
+        self.messages = [\
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT,
             }
         ]
+
+        # If resuming a session, load saved messages
+        if self.session_manager and self.session_manager.exists:
+            loaded = self.session_manager.load_messages()
+            if loaded:
+                self.messages = loaded
 
         # ----------------------------------------------------
         # Tool Call Count
@@ -199,6 +245,204 @@ class AgentRuntime:
         # Task State
         # ----------------------------------------------------
         self.task_state = create_task_state()
+
+    @staticmethod
+    def _inject_no_think(messages: list) -> list:
+        """
+        在最後一條 role=user 的 message 尾部注入 /no_think。
+
+        Qwen3 的 /no_think token 必須在 user message 結尾
+        才能可靠地停用思考模式。放在 system prompt 裡無效。
+
+        回傳淺拷貝，不修改原始 messages。
+        """
+
+        patched = list(messages)
+
+        # 從後往前找最後一條 user message
+        for i in range(len(patched) - 1, -1, -1):
+            msg = patched[i]
+
+            # 支援 dict 和 Ollama Message 物件
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+
+            if role == "user" and content:
+                if "/no_think" not in content:
+                    if isinstance(msg, dict):
+                        patched[i] = {**msg, "content": content + " /no_think"}
+                    else:
+                        # Ollama Message 物件 — 複製一份
+                        import copy
+                        new_msg = copy.copy(msg)
+                        new_msg.content = content + " /no_think"
+                        patched[i] = new_msg
+                break
+
+        return patched
+
+    def _do_chat(self, messages: list, tools: list):
+        """
+        呼叫 LLM。支援 streaming 和 non-streaming 兩種模式。
+
+        Non-streaming（self.stream=False，預設）：
+            直接呼叫 chat()，回傳 message 物件。
+            測試透過 monkeypatch chat() 來控制回傳值。
+
+        Streaming（self.stream=True）：
+            使用 stream=True 讓 token 即時印出。
+
+            - Agent 呼叫 tool 時（response 有 tool_calls）：
+              Ollama 不輸出 text content，terminal 沒有輸出。
+
+            - Agent 給出最終回答時（response 無 tool_calls）：
+              token 即時印出，使用者看到字一個一個出現。
+
+            印出前會過濾 Qwen3 的 <think>...</think> 思考區塊。
+
+        Returns
+        -------
+        message : Ollama Message 物件（含 content 與 tool_calls）
+        """
+
+        self._last_response_was_streamed = False
+
+        # ----------------------------------------------------------
+        # Qwen3 /no_think 注入
+        #
+        # Qwen3 的 /no_think 必須在「最後一條 user message」
+        # 的結尾才能可靠地停用思考模式。
+        # 放在 system prompt 裡效果不穩定。
+        #
+        # 思考模式會讓 Qwen3 把 tool call 包在 <think> 裡，
+        # 導致 Ollama 無法解析 tool_calls → 空答案。
+        # ----------------------------------------------------------
+
+        patched_messages = self._inject_no_think(messages)
+
+        # ----------------------------------------------------------
+        # Non-streaming（預設，測試模式）
+        # ----------------------------------------------------------
+
+        if not self.stream:
+            response = chat(
+                model=self.model,
+                messages=patched_messages,
+                tools=tools,
+            )
+            return response.message
+
+        # ----------------------------------------------------------
+        # Streaming 模式
+        # ----------------------------------------------------------
+
+        full_content = ""
+        final_message = None
+        has_printed = False
+        in_think_block = False
+        accumulated_tool_calls = []
+
+        # Think block 進度追蹤
+        think_char_count = 0     # 累計 think block 字元數
+        think_dots_shown = 0     # 已印出幾個點
+        THINK_DOT_INTERVAL = 60  # 每 60 個 think 字元印一個點
+
+        THINK_OPEN = "<think>"
+        THINK_CLOSE = "</think>"
+
+        for chunk in chat(
+            model=self.model,
+            messages=patched_messages,
+            tools=tools,
+            stream=True,
+        ):
+            token = chunk.message.content or ""
+
+            if token:
+                full_content += token
+
+                # ------------------------------------------------
+                # 過濾 <think> 區塊（Qwen3 thinking mode）
+                # 同時追蹤 think 字元數以顯示進度
+                # ------------------------------------------------
+
+                visible = ""
+                buf = token
+
+                while buf:
+                    if in_think_block:
+                        idx = buf.find(THINK_CLOSE)
+                        if idx == -1:
+                            # 整段都是 think 內容
+                            think_char_count += len(buf)
+                            buf = ""
+                        else:
+                            think_char_count += idx
+                            in_think_block = False
+                            buf = buf[idx + len(THINK_CLOSE):]
+                    else:
+                        idx = buf.find(THINK_OPEN)
+                        if idx == -1:
+                            visible += buf
+                            buf = ""
+                        else:
+                            visible += buf[:idx]
+                            in_think_block = True
+                            buf = buf[idx + len(THINK_OPEN):]
+
+                # ------------------------------------------------
+                # Think block 進度點（接在 run() 印的 🤔 後面）
+                # ------------------------------------------------
+
+                new_dots = (think_char_count // THINK_DOT_INTERVAL) - think_dots_shown
+                if new_dots > 0:
+                    if think_dots_shown == 0 and not SHOW_AGENT_TRACE:
+                        # SHOW_AGENT_TRACE=False 時 run() 不印 🤔，補印前綴
+                        print("🤔 ", end="", flush=True)
+                    print("." * new_dots, end="", flush=True)
+                    think_dots_shown += new_dots
+
+                # ------------------------------------------------
+                # Visible 內容即時印出
+                # ------------------------------------------------
+
+                if visible.strip():
+                    if not has_printed:
+                        # 換行結束 🤔 那一行
+                        print()
+                        print()
+                        print("Qwen > ", end="", flush=True)
+                        has_printed = True
+                    print(visible, end="", flush=True)
+
+            # ------------------------------------------------
+            # 累計 Tool Calls
+            #
+            # Ollama streaming 模式下，tool_calls 出現在中間某個
+            # chunk，而最後一個 chunk（done=True）的 tool_calls
+            # 往往是 None。必須在整個串流過程中累計。
+            # ------------------------------------------------
+
+            if chunk.message.tool_calls:
+                accumulated_tool_calls.extend(chunk.message.tool_calls)
+
+            if chunk.done:
+                final_message = chunk.message
+
+        if has_printed:
+            print()  # 串流結束後換行
+            self._last_response_was_streamed = True
+
+        if final_message:
+            # 補齊 content（Ollama streaming 最後一個 chunk content 可能為空）
+            if not final_message.content:
+                final_message.content = full_content
+
+            # 補齊 tool_calls（重要：中間 chunk 收集到的 tool_calls）
+            if accumulated_tool_calls and not final_message.tool_calls:
+                final_message.tool_calls = accumulated_tool_calls
+
+        return final_message
 
     def _build_tool_registry(self):
         """
@@ -240,6 +484,7 @@ class AgentRuntime:
             "git_diff": lambda **kwargs: git_diff(),
             "git_log": self._git_log_tool,
             "git_commit": self._git_commit_tool,
+            "git_run": lambda **kwargs: git_run(**kwargs),
         }
 
     def _execute_command_tool(
@@ -325,6 +570,7 @@ class AgentRuntime:
 
         self.tool_call_count = 0
         self.tool_history = []
+        self._empty_answer_count = 0
 
         start_task(
             self.task_state,
@@ -1232,7 +1478,7 @@ class AgentRuntime:
 
             exists_result = file_exists(path)
 
-            if exists_result is True:
+            if isinstance(exists_result, str) and exists_result.startswith("存在："):
 
                 return {
                     "status": "verified",
@@ -2658,6 +2904,9 @@ Agent Final Answer：
 
         self.start_task(user_input)
 
+        # 每個新 Task 重置 Auto Test 計數
+        self._auto_test_fix_count = 0
+
         self.messages.append(
             {
                 "role": "user",
@@ -2743,15 +2992,19 @@ Agent Final Answer：
 
         while True:
 
-            response = chat(
-                model=self.model,
-                messages=self.messages,
-                tools=tools,
-            )
+            # 在 LLM 被呼叫之前立即顯示指示符
+            # streaming=True：讓使用者知道 LLM 正在被呼叫（even 在第一個 token 前）
+            # streaming=False（測試模式）：_do_chat 是 blocking，不需要指示符
+            if self.stream and SHOW_AGENT_TRACE:
+                print("\n🤔 ", end="", flush=True)
 
-            response_message = response.message
+            response_message = self._do_chat(self.messages, tools)
 
             tool_calls = response_message.tool_calls
+
+            # 若有 tool call，🤔 那行沒有後續內容，加換行讓 TRACE 輸出整齊
+            if tool_calls and self.stream and SHOW_AGENT_TRACE:
+                print()
 
             # =================================================
             # Agent 要執行 Tool
@@ -2762,6 +3015,9 @@ Agent Final Answer：
                 self.messages.append(response_message)
 
                 tool_limit_reached = False
+
+                # 追蹤這一批 tool calls 中寫入的檔案（Auto Test Loop 用）
+                files_written_this_batch: set = set()
 
                 for tool_call in tool_calls:
 
@@ -2921,6 +3177,15 @@ Agent Final Answer：
                             "content": str(tool_result),
                         }
                     )
+
+                    # =========================================
+                    # Auto Test Loop：記錄寫入的檔案
+                    # =========================================
+
+                    if tool_name in {"write_file", "edit_file"}:
+                        file_path = arguments.get("path", "")
+                        if file_path:
+                            files_written_this_batch.add(file_path)
 
                     # =================================================
                     # Phase 9.3
@@ -3241,6 +3506,44 @@ Agent Final Answer：
                         "因此停止執行目前任務。"
                     )
 
+                # =================================================
+                # Auto Test Loop
+                #
+                # 這一批 tool calls 結束後，
+                # 若有 Python 檔案被寫入，自動執行 pytest。
+                # 測試失敗時把結果注入 context，
+                # Agent 在下一輪 LLM call 會看到並嘗試修復。
+                # =================================================
+
+                if (
+                    self.auto_test
+                    and self._auto_test_fix_count < MAX_AUTO_TEST_FIX_ATTEMPTS
+                    and self.test_runner.should_run(files_written_this_batch)
+                ):
+
+                    if SHOW_AGENT_TRACE:
+                        print()
+                        print("🧪 Auto Test：執行 pytest...")
+
+                    test_result = self.test_runner.run()
+                    test_message = self.test_runner.format_for_agent(test_result)
+
+                    self.messages.append(
+                        {
+                            "role": "system",
+                            "content": test_message,
+                        }
+                    )
+
+                    if SHOW_AGENT_TRACE:
+                        status = "✅ PASS" if test_result["success"] else "❌ FAIL"
+                        print(f"🧪 Auto Test：{status}")
+
+                    if not test_result["success"]:
+                        self._auto_test_fix_count += 1
+                    else:
+                        self._auto_test_fix_count = 0
+
                 continue
 
             # =================================================
@@ -3249,6 +3552,45 @@ Agent Final Answer：
             # =================================================
 
             final_answer = self.clean_final_answer(response_message.content)
+
+            # -------------------------------------------------
+            # 空答案檢查（Qwen3 thinking mode 可能只產生
+            # <think> 區塊而沒有實際回答）
+            # -------------------------------------------------
+
+            if not final_answer.strip():
+
+                self._empty_answer_count = getattr(self, "_empty_answer_count", 0) + 1
+
+                if self._empty_answer_count >= MAX_EMPTY_ANSWER_RETRIES:
+                    if SHOW_AGENT_TRACE:
+                        print(
+                            "\n⚠️ Runtime：連續空答案達到上限，"
+                            "停止重試。"
+                        )
+                    self.finish_task("stopped")
+                    return (
+                        "抱歉，我無法生成有效的回答。"
+                        "請換個方式描述您的問題，"
+                        "或確認專案目錄是否存在所需的檔案。"
+                    )
+
+                self.messages.append(response_message)
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "/no_think "
+                            "[SYSTEM] 你的回答是空的。"
+                            "你必須使用工具來完成此任務。"
+                            "請立即呼叫 list_files 或 read_file 讀取實際檔案，"
+                            "再提供完整的繁體中文回答。"
+                            "不能在沒有使用工具的情況下直接回答。"
+                        ),
+                    }
+                )
+
+                continue  # 重新進入 loop，讓 Agent 再試一次
 
             self.messages.append(response_message)
 
@@ -3374,5 +3716,15 @@ Agent Final Answer：
             # =================================================
 
             self.finish_task("completed")
+
+            # -------------------------------------------------
+            # Session Persistence：儲存對話到磁碟
+            # -------------------------------------------------
+
+            if self.session_manager:
+                self.session_manager.save(
+                    self.messages,
+                    extra={"model": self.model},
+                )
 
             return final_answer

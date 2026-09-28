@@ -1,0 +1,4 @@
+# 依賴庫清單
+requests>=2.25.1
+pandas>=1.3.5
+matplotlib>=3.5.0

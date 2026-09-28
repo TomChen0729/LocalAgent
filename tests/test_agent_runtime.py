@@ -62,7 +62,8 @@ def test_max_tool_calls(monkeypatch):
 
     responses = []
 
-    for i in range(25):
+    # 生成足夠多的 responses 來觸發 MAX_TOOL_CALLS 限制
+    for i in range(runtime_module.MAX_TOOL_CALLS + 5):
 
         responses.append(
             make_response(
@@ -657,7 +658,7 @@ def test_create_directory_verification(
     monkeypatch.setattr(
         runtime_module,
         "file_exists",
-        lambda path: True,
+        lambda path: f"存在：{path}\n類型：資料夾",
     )
 
     agent = AgentRuntime()

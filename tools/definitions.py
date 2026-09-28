@@ -304,13 +304,71 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "git_run",
+            "description": (
+                "執行任意 Git 子命令。"
+                "當 git_status、git_log、git_diff、git_commit 無法滿足需求時，"
+                "使用此工具執行其他 Git 操作。"
+                "例如：push、pull、branch、checkout、stash、merge、"
+                "rebase、tag、reset、fetch、remote、cherry-pick 等。"
+                "subcommand 只填 git 子命令名稱（如 push），"
+                "其餘參數放入 args 清單（如 [\"origin\", \"main\"]）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subcommand": {
+                        "type": "string",
+                        "description": (
+                            "Git 子命令名稱，例如 push、pull、branch、"
+                            "checkout、stash、merge、rebase、tag、reset、"
+                            "fetch、remote、cherry-pick、clean、worktree。"
+                            "只填單一子命令，不可包含空白或旗標。"
+                        ),
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Git 子命令的參數，必須是 string list。"
+                            "例如 [\"origin\", \"main\"]、[\"-b\", \"feature/xyz\"]、"
+                            "[\"--oneline\", \"-10\"]。"
+                        ),
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "最大執行秒數。"
+                            "網路操作（pull/push/fetch）預設 120 秒，"
+                            "其他操作預設 30 秒。"
+                            "最大 600 秒。"
+                        ),
+                        "minimum": 1,
+                        "maximum": 600,
+                    },
+                },
+                "required": ["subcommand"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "execute_command",
             "description": (
                 "Execute an allowed development command "
                 "inside the current project. "
-                "Use this for running tests or development tools "
-                "such as pytest, python, php, composer, npm, node, "
-                "or docker."
+                "Allowed programs: "
+                "python, python3, pytest, "
+                "pip, pip3, uv, "
+                "ruff, flake8, pylint, "
+                "mypy, pyright, "
+                "black, isort, "
+                "make, "
+                "npm, node, npx, yarn, pnpm, "
+                "php, composer, "
+                "cargo, go, ruby, bundle, "
+                "docker, docker-compose."
             ),
             "parameters": {
                 "type": "object",
@@ -319,9 +377,11 @@ tools = [
                         "type": "string",
                         "description": (
                             "The executable program to run. "
-                            "Allowed programs include "
-                            "python, pytest, php, composer, "
-                            "npm, node, and docker."
+                            "Python tools: python, pytest, pip, pip3, uv, "
+                            "ruff, flake8, pylint, mypy, pyright, black, isort. "
+                            "Node tools: npm, node, npx, yarn, pnpm. "
+                            "Other: php, composer, cargo, go, ruby, bundle, "
+                            "docker, docker-compose, make."
                         ),
                     },
                     "arguments": {

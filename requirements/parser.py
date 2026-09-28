@@ -136,13 +136,9 @@ tool_constraints
 
 例如：
 
-「不要使用其他 Tool」
-
-如果使用者同時指定：
-
 「只能使用 read_file，不要使用其他 Tool」
 
-則：
+應該：
 
 {
   "allowed_tools": ["read_file"],
@@ -150,6 +146,27 @@ tool_constraints
 }
 
 不要自行列出所有其他 Tool。
+
+==================================================
+重要：這些情況 不是 tool_constraints
+==================================================
+
+以下情況是「任務執行順序」或「操作建議」，
+絕對不能放入 tool_constraints：
+
+「請先用 list_files 看一下 X 的結構，再解釋」
+→ 這是使用者在描述他希望的執行順序，不是 Tool 限制。
+→ tool_constraints 應該是空的：
+   {"allowed_tools": [], "forbidden_tools": []}
+
+「先讀 A，再改 B」
+→ 也是執行順序指令，不是限制。
+
+「用 read_file 讀取 main.py」
+→ 這是在描述任務方式，不是限制。
+
+只有當使用者明確說「只能使用」、「不允許使用」、「禁止使用」
+等字眼時，才填入 tool_constraints。
 
 ==================================================
 state_requirements
@@ -244,6 +261,57 @@ language 預設：
 "zh-TW"
 
 ==================================================
+建立型任務（type = "create"）的特殊規則
+==================================================
+
+當使用者要求「建立新專案」或「建立新資料夾」時，
+即使不知道確切的專案名稱，也必須生成 state_requirements。
+
+使用 **/ 前綴的 Glob 路徑 表示「在任何子目錄中」。
+
+根據使用者明確提到的技術或功能推斷必要的 requirement：
+
+使用者提到「Python 專案」或「Python 程式」：
+→ {"type": "file_exists", "path": "**/*.py"}
+
+使用者提到「爬蟲」（英：crawler / scraper）：
+→ {"type": "file_exists", "path": "**/*.py"}
+→ {"type": "contains", "path": "**/requirements.txt", "text": "requests"}
+
+使用者提到「視覺化」或「matplotlib」或「圖表」：
+→ {"type": "contains", "path": "**/requirements.txt", "text": "matplotlib"}
+
+使用者提到「資料處理」或「pandas」或「DataFrame」：
+→ {"type": "contains", "path": "**/requirements.txt", "text": "pandas"}
+
+使用者提到「Flask」或「API」或「Web 服務」：
+→ {"type": "contains", "path": "**/requirements.txt", "text": "flask"}
+
+使用者提到「Django」：
+→ {"type": "contains", "path": "**/requirements.txt", "text": "django"}
+
+使用者提到「測試」或「test」：
+→ {"type": "file_exists", "path": "**/test_*.py"}
+
+如果使用者明確指定了專案名稱（例如「建立 MyProject 資料夾」）：
+→ 直接使用該名稱：{"type": "file_exists", "path": "MyProject"}
+
+不要因為「不確定路徑」就把 state_requirements 留成空 []。
+建立型任務必須有至少一個可驗證的 requirement。
+
+範例：
+
+使用者：「幫我建一個台股爬蟲的 Python 視覺化專案」
+
+應該：
+
+"state_requirements": [
+  {"type": "file_exists", "path": "**/*.py"},
+  {"type": "contains", "path": "**/requirements.txt", "text": "requests"},
+  {"type": "contains", "path": "**/requirements.txt", "text": "matplotlib"}
+]
+
+==================================================
 重要
 ==================================================
 
@@ -322,7 +390,7 @@ class RequirementParser:
                     },
                     {
                         "role": "user",
-                        "content": user_input,
+                        "content": user_input + " /no_think",
                     },
                 ],
             )
